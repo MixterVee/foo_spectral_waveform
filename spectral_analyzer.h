@@ -15,6 +15,8 @@ public:
 
 private:
     void analyze_window(const float* mono, std::size_t count);
+    void feed_envelope_sample(float mono);
+    void flush_envelope();
     void fft(std::vector<float>& real, std::vector<float>& imag) const;
     static std::size_t next_power_of_two(std::size_t v);
     static std::uint8_t compress_energy(double x);
@@ -26,6 +28,13 @@ private:
 
     std::vector<float> m_mono_buffer;
     std::vector<waveform_point> m_points;
+    std::vector<waveform_envelope_point> m_envelope;
+
+    std::size_t m_envelope_frames = 0;
+    std::size_t m_envelope_count = 0;
+    float m_envelope_peak = 0.0f;
+    double m_envelope_sum_squares = 0.0;
+
     std::uint64_t m_total_frames = 0;
 };
 
