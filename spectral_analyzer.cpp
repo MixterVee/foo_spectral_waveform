@@ -13,12 +13,41 @@ spectral_analyzer::spectral_analyzer(std::uint32_t sample_rate, std::uint32_t ch
     m_window_size = std::min<std::size_t>(m_window_size, 4096);
     m_hop_size = m_window_size / 2;
     m_mono_buffer.reserve(m_window_size * 2);
+
+    // About 5 ms per envelope point. This is intentionally independent of the
+    // FFT hop so zoomed waveform detail can be much finer without extra FFTs.
+    m_envelope_frames = std::max<std::size_t>(64, sample_rate / 200);
+    m_envelope.reserve(4096);
 }
 
 std::size_t spectral_analyzer::next_power_of_two(std::size_t v) {
     std::size_t p = 1;
     while (p < v) p <<= 1;
     return p;
+}
+
+void spectral_analyzer::feed_envelope_sample(float mono) {
+    m_envelope_peak = std::max(m_envelope_peak, std::abs(mono));
+    m_envelope_sum_squares += static_cast<double>(mono) * static_cast<double>(mono);
+    ++m_envelope_count;
+
+    if (m_envelope_count >= m_envelope_frames) flush_envelope();
+}
+
+void spectral_analyzer::flush_envelope() {
+    if (m_envelope_count == 0) return;
+
+    const double rms = std::sqrt(m_envelope_sum_squares / static_cast<double>(m_envelope_count));
+    waveform_envelope_point p;
+    p.peak = static_cast<std::uint16_t>(std::lround(
+        std::min(1.0f, m_envelope_peak) * 65535.0f));
+    p.rms = static_cast<std::uint16_t>(std::lround(
+        std::min(1.0, rms) * 65535.0));
+    m_envelope.push_back(p);
+
+    m_envelope_count = 0;
+    m_envelope_peak = 0.0f;
+    m_envelope_sum_squares = 0.0;
 }
 
 void spectral_analyzer::feed(const float* interleaved, std::size_t frame_count) {
@@ -30,7 +59,10 @@ void spectral_analyzer::feed(const float* interleaved, std::size_t frame_count) 
         const float* frame = interleaved + f * m_channels;
         for (std::uint32_t c = 0; c < m_channels; ++c) mono += frame[c];
         mono /= static_cast<double>(m_channels);
-        m_mono_buffer.push_back(static_cast<float>(mono));
+        const float monoSample = static_cast<float>(mono);
+
+        feed_envelope_sample(monoSample);
+        m_mono_buffer.push_back(monoSample);
 
         while (m_mono_buffer.size() >= m_window_size) {
             analyze_window(m_mono_buffer.data(), m_window_size);
@@ -95,6 +127,8 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
 }
 
 waveform_data spectral_analyzer::finish() {
+    flush_envelope();
+
     if (!m_mono_buffer.empty()) {
         std::vector<float> final_window(m_window_size, 0.0f);
         std::copy(m_mono_buffer.begin(), m_mono_buffer.end(), final_window.begin());
@@ -107,6 +141,7 @@ waveform_data spectral_analyzer::finish() {
     out.channels = m_channels;
     out.duration_seconds = m_sample_rate ? static_cast<double>(m_total_frames) / m_sample_rate : 0.0;
     out.points = std::move(m_points);
+    out.envelope = std::move(m_envelope);
     return out;
 }
 
