@@ -51,10 +51,13 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
     std::vector<float> real(m_window_size, 0.0f);
     std::vector<float> imag(m_window_size, 0.0f);
     float peak = 0.0f;
+    double sumSquares = 0.0;
 
     for (std::size_t i = 0; i < count; ++i) {
         const float s = mono[i];
         peak = std::max(peak, std::abs(s));
+        sumSquares += static_cast<double>(s) * static_cast<double>(s);
+
         const double w = 0.5 - 0.5 * std::cos((2.0 * kPi * static_cast<double>(i)) /
             static_cast<double>(std::max<std::size_t>(1, count - 1)));
         real[i] = static_cast<float>(s * w);
@@ -80,9 +83,11 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
     const double low_n = std::min(1.0, (low / total) * 3.0);
     const double mid_n = std::min(1.0, (mid / total) * 3.0);
     const double high_n = std::min(1.0, (high / total) * 3.0);
+    const double rms = count > 0 ? std::sqrt(sumSquares / static_cast<double>(count)) : 0.0;
 
     waveform_point p;
     p.peak = static_cast<std::uint16_t>(std::lround(std::min(1.0f, peak) * 65535.0f));
+    p.rms = static_cast<std::uint16_t>(std::lround(std::min(1.0, rms) * 65535.0));
     p.bass = compress_energy(low_n);
     p.mids = compress_energy(mid_n);
     p.treble = compress_energy(high_n);
@@ -101,6 +106,16 @@ waveform_data spectral_analyzer::finish() {
     out.sample_rate = m_sample_rate;
     out.channels = m_channels;
     out.duration_seconds = m_sample_rate ? static_cast<double>(m_total_frames) / m_sample_rate : 0.0;
+
+    if (!m_points.empty()) {
+        std::vector<std::uint16_t> rmsValues;
+        rmsValues.reserve(m_points.size());
+        for (const auto& p : m_points) rmsValues.push_back(p.rms);
+        const std::size_t index = (rmsValues.size() - 1) * 95 / 100;
+        std::nth_element(rmsValues.begin(), rmsValues.begin() + index, rmsValues.end());
+        out.rms_reference = std::max<std::uint16_t>(1, rmsValues[index]);
+    }
+
     out.points = std::move(m_points);
     return out;
 }
