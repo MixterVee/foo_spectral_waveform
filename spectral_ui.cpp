@@ -205,11 +205,12 @@ private:
         begin = std::min(begin, count - 1);
         end = std::max(begin + 1, std::min(end, count));
 
-        uint64_t bass = 0, mids = 0, treble = 0;
+        uint64_t rms = 0, bass = 0, mids = 0, treble = 0;
         uint16_t peak = 0;
         for (size_t i = begin; i < end; ++i) {
             const auto& p = data.points[i];
             peak = std::max(peak, p.peak);
+            rms += p.rms;
             bass += p.bass;
             mids += p.mids;
             treble += p.treble;
@@ -217,10 +218,25 @@ private:
 
         const uint64_t n = static_cast<uint64_t>(end - begin);
         out.peak = peak;
+        out.rms = static_cast<uint16_t>(rms / n);
         out.bass = static_cast<uint8_t>(bass / n);
         out.mids = static_cast<uint8_t>(mids / n);
         out.treble = static_cast<uint8_t>(treble / n);
         return out;
+    }
+
+    static double display_amplitude(const spectral_waveform::waveform_point& point) {
+        const double rms = point.rms / 65535.0;
+        const double peak = point.peak / 65535.0;
+        if (rms <= 1.0e-8 && peak <= 1.0e-8) return 0.0;
+
+        // Absolute RMS scale instead of per-track normalization. A typical modern
+        // master around -10 dBFS RMS lands near 65-70% height instead of the top.
+        const double db = 20.0 * std::log10(std::max(rms, 1.0e-8));
+        const double normalized = std::clamp((db + 48.0) / 45.0, 0.0, 1.0);
+        const double loudnessShape = std::pow(normalized, 2.15);
+        const double transient = std::sqrt(std::clamp(peak, 0.0, 1.0));
+        return std::clamp(0.95 * loudnessShape + 0.05 * transient, 0.0, 1.0);
     }
 
     void draw_status_text(HDC dc, const RECT& rc, const wchar_t* text) const {
@@ -257,7 +273,7 @@ private:
                 HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
                 for (int x = xStart; x < xEnd; ++x) {
                     const auto point = aggregate_point(*waveform, x, width);
-                    const double amp = point.peak / 65535.0;
+                    const double amp = display_amplitude(point);
                     const int half = static_cast<int>(std::lround(amp * usable * 0.5));
                     if (half <= 0) continue;
 
@@ -397,7 +413,6 @@ private:
 
     void on_playback_stop(play_control::t_stop_reason) override {
         stop_analysis();
-        clear_waveform();
         invalidate_all();
     }
 
