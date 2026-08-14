@@ -21,9 +21,9 @@ namespace {
 static const GUID guid_spectral_waveform_ui =
 { 0x8a3fe0d1, 0x62dc, 0x4bf2, { 0x9a, 0x72, 0x56, 0x37, 0x42, 0x2c, 0xb1, 0x91 } };
 
-static const wchar_t* kWindowClassName = L"foo_spectral_waveform_ui_v02";
+static const wchar_t* kWindowClassName = L"foo_spectral_waveform_ui_v03";
 static constexpr UINT kMsgAnalysisReady = WM_APP + 0x351;
-static constexpr double kMinViewSpan = 0.02; // 50x maximum horizontal zoom.
+static constexpr double kMinViewSpan = 0.02;
 
 class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
 public:
@@ -36,16 +36,14 @@ public:
             play_callback::flag_on_playback_time),
           m_callback(callback) {
         ensure_window_class();
-        m_wnd = CreateWindowExW(
-            0, kWindowClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        m_wnd = CreateWindowExW(0, kWindowClassName, L"",
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             0, 0, 0, 0, parent, nullptr, core_api::get_my_instance(), this);
         if (m_wnd == nullptr) throw exception_win32(GetLastError());
         SetTimer(m_wnd, 1, 50, nullptr);
 
         metadb_handle_ptr nowPlaying;
-        if (playback_control::get()->get_now_playing(nowPlaying)) {
-            start_analysis(nowPlaying);
-        }
+        if (playback_control::get()->get_now_playing(nowPlaying)) start_analysis(nowPlaying);
     }
 
     ~spectral_waveform_instance() {
@@ -59,11 +57,9 @@ public:
 
     HWND get_wnd() override { return m_wnd; }
     void set_configuration(ui_element_config::ptr) override {}
-
     ui_element_config::ptr get_configuration() override {
         return ui_element_config::g_create_empty(guid_spectral_waveform_ui);
     }
-
     GUID get_guid() override { return guid_spectral_waveform_ui; }
     GUID get_subclass() override { return ui_element_subclass_playback_visualisation; }
 
@@ -75,17 +71,13 @@ public:
     }
 
     void notify(const GUID& what, t_size, const void*, t_size) override {
-        if (what == ui_element_notify_colors_changed && m_wnd != nullptr) {
-            m_lastPlayX = -1;
-            InvalidateRect(m_wnd, nullptr, FALSE);
-        }
+        if (what == ui_element_notify_colors_changed && m_wnd != nullptr) invalidate_all();
     }
 
 private:
     static void ensure_window_class() {
         static bool registered = false;
         if (registered) return;
-
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof(wc);
         wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
@@ -94,7 +86,6 @@ private:
         wc.hCursor = LoadCursor(nullptr, IDC_HAND);
         wc.hbrBackground = nullptr;
         wc.lpszClassName = kWindowClassName;
-
         if (RegisterClassExW(&wc) == 0) {
             const DWORD err = GetLastError();
             if (err != ERROR_CLASS_ALREADY_EXISTS) throw exception_win32(err);
@@ -103,43 +94,38 @@ private:
     }
 
     static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
-        spectral_waveform_instance* self = reinterpret_cast<spectral_waveform_instance*>(
-            GetWindowLongPtrW(wnd, GWLP_USERDATA));
-
+        auto* self = reinterpret_cast<spectral_waveform_instance*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
         if (msg == WM_NCCREATE) {
-            auto cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
             self = static_cast<spectral_waveform_instance*>(cs->lpCreateParams);
             SetWindowLongPtrW(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         }
-
         if (self != nullptr) return self->handle_message(wnd, msg, wp, lp);
         return DefWindowProcW(wnd, msg, wp, lp);
     }
 
     LRESULT handle_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_PAINT:
-            paint();
-            return 0;
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT: paint(); return 0;
         case WM_TIMER:
-            invalidate_playhead();
+            if (!update_follow_view()) invalidate_playhead();
             return 0;
         case WM_SIZE:
-            m_lastPlayX = -1;
-            InvalidateRect(wnd, nullptr, FALSE);
+            invalidate_all();
             return 0;
         case WM_MOUSEWHEEL:
             zoom_from_wheel(GET_WHEEL_DELTA_WPARAM(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_KEYDOWN:
             if (wp == VK_SPACE && m_viewSpan < 0.9995) {
+                m_followPlayhead = true;
                 recenter_on_playhead();
                 return 0;
             }
             break;
         case WM_LBUTTONDOWN:
+            SetFocus(wnd);
             begin_drag(GET_X_LPARAM(lp));
             return 0;
         case WM_MOUSEMOVE:
@@ -156,8 +142,7 @@ private:
             seek_from_x(GET_X_LPARAM(lp));
             return 0;
         case kMsgAnalysisReady:
-            m_lastPlayX = -1;
-            InvalidateRect(wnd, nullptr, FALSE);
+            invalidate_all();
             return 0;
         case WM_NCDESTROY:
             SetWindowLongPtrW(wnd, GWLP_USERDATA, 0);
@@ -176,11 +161,10 @@ private:
     void reset_view() {
         m_viewStart = 0.0;
         m_viewSpan = 1.0;
+        m_followPlayhead = false;
     }
 
-    double view_end() const {
-        return std::min(1.0, m_viewStart + m_viewSpan);
-    }
+    double view_end() const { return std::min(1.0, m_viewStart + m_viewSpan); }
 
     void clamp_view() {
         m_viewSpan = std::clamp(m_viewSpan, kMinViewSpan, 1.0);
@@ -188,50 +172,60 @@ private:
         if (m_viewSpan > 0.9995) reset_view();
     }
 
-    void recenter_on_playhead() {
-        if (m_wnd == nullptr || m_viewSpan >= 0.9995) return;
-
+    bool playback_fraction(double& out) const {
         auto pc = playback_control::get();
         const double length = pc->playback_get_length_ex();
-        if (length <= 0.0) return;
+        if (length <= 0.0) return false;
+        out = std::clamp(pc->playback_get_position() / length, 0.0, 1.0);
+        return true;
+    }
 
-        const double positionFrac = std::clamp(pc->playback_get_position() / length, 0.0, 1.0);
+    void recenter_on_playhead() {
+        if (m_wnd == nullptr || m_viewSpan >= 0.9995) return;
+        double positionFrac = 0.0;
+        if (!playback_fraction(positionFrac)) return;
         m_viewStart = positionFrac - m_viewSpan * 0.5;
         clamp_view();
-        m_lastPlayX = -1;
-        InvalidateRect(m_wnd, nullptr, FALSE);
+        invalidate_all();
+    }
+
+    bool update_follow_view() {
+        if (!m_followPlayhead || m_viewSpan >= 0.9995 || m_dragging || m_wnd == nullptr) return false;
+        if (!playback_control::get()->is_playing()) return false;
+        double positionFrac = 0.0;
+        if (!playback_fraction(positionFrac)) return false;
+
+        const double oldStart = m_viewStart;
+        m_viewStart = positionFrac - m_viewSpan * 0.5;
+        clamp_view();
+        if (std::abs(m_viewStart - oldStart) < 1.0e-9) return false;
+        invalidate_all();
+        return true;
     }
 
     int current_playhead_x(int width) const {
         if (width <= 0) return -1;
-
         auto pc = playback_control::get();
         if (!pc->is_playing()) return -1;
-        const double length = pc->playback_get_length_ex();
-        if (length <= 0.0) return -1;
-
-        const double positionFrac = std::clamp(pc->playback_get_position() / length, 0.0, 1.0);
+        double positionFrac = 0.0;
+        if (!playback_fraction(positionFrac)) return -1;
         if (positionFrac < m_viewStart || positionFrac > view_end()) return -1;
-
         const double visibleFrac = (positionFrac - m_viewStart) / m_viewSpan;
         return static_cast<int>(visibleFrac * std::max(0, width - 1));
     }
 
     void invalidate_playhead() {
         if (m_wnd == nullptr) return;
-
         RECT rc{};
         GetClientRect(m_wnd, &rc);
-        const int width = rc.right - rc.left;
-        const int newX = current_playhead_x(width);
+        const int newX = current_playhead_x(rc.right - rc.left);
         if (newX == m_lastPlayX) return;
 
         auto invalidate_strip = [this, &rc](int x) {
             if (x < 0) return;
-            RECT strip{ x - 3, rc.top, x + 4, rc.bottom };
+            RECT strip{x - 3, rc.top, x + 4, rc.bottom};
             InvalidateRect(m_wnd, &strip, FALSE);
         };
-
         invalidate_strip(m_lastPlayX);
         invalidate_strip(newX);
         m_lastPlayX = newX;
@@ -239,7 +233,6 @@ private:
 
     void zoom_from_wheel(short delta, int screenX, int screenY) {
         if (delta == 0 || m_wnd == nullptr) return;
-
         POINT pt{screenX, screenY};
         ScreenToClient(m_wnd, &pt);
         RECT rc{};
@@ -259,11 +252,12 @@ private:
             m_viewSpan = newSpan;
             m_viewStart = anchor - cursorX * m_viewSpan;
             clamp_view();
+            m_followPlayhead = true;
             SetFocus(m_wnd);
+            recenter_on_playhead();
+            return;
         }
-
-        m_lastPlayX = -1;
-        InvalidateRect(m_wnd, nullptr, FALSE);
+        invalidate_all();
     }
 
     void begin_drag(int x) {
@@ -283,13 +277,15 @@ private:
         if (width <= 1) return;
 
         const int dx = x - m_dragStartX;
-        if (std::abs(dx) >= 3) m_dragMoved = true;
+        if (std::abs(dx) >= 3) {
+            m_dragMoved = true;
+            m_followPlayhead = false;
+        }
         if (!m_dragMoved || m_viewSpan >= 0.9995) return;
 
         m_viewStart = m_dragStartView - (static_cast<double>(dx) / static_cast<double>(width - 1)) * m_viewSpan;
         clamp_view();
-        m_lastPlayX = -1;
-        InvalidateRect(m_wnd, nullptr, FALSE);
+        invalidate_all();
     }
 
     void end_drag(int x) {
@@ -329,7 +325,6 @@ private:
             mids += p.mids;
             treble += p.treble;
         }
-
         const uint64_t n = static_cast<uint64_t>(end - begin);
         out.peak = peak;
         out.rms = static_cast<uint16_t>(rms / n);
@@ -343,7 +338,6 @@ private:
         const double rms = point.rms / 65535.0;
         const double peak = point.peak / 65535.0;
         if (rms <= 1.0e-8 && peak <= 1.0e-8) return 0.0;
-
         const double db = 20.0 * std::log10(std::max(rms, 1.0e-8));
         const double normalized = std::clamp((db + 42.0) / 42.0, 0.0, 1.0);
         const double loudnessShape = std::pow(normalized, 2.60);
@@ -387,7 +381,6 @@ private:
                     const double amp = display_amplitude(point);
                     const int half = static_cast<int>(std::lround(amp * usable * 0.5));
                     if (half <= 0) continue;
-
                     const auto color = spectral_waveform::color_for_point(point);
                     SetDCPenColor(dc, RGB(color.r, color.g, color.b));
                     MoveToEx(dc, x, mid - half, nullptr);
@@ -410,7 +403,6 @@ private:
                 m_lastPlayX = playX;
             }
         }
-
         EndPaint(m_wnd, &ps);
     }
 
@@ -429,6 +421,7 @@ private:
         const double visible = std::clamp(static_cast<double>(x) / static_cast<double>(width - 1), 0.0, 1.0);
         const double trackFrac = std::clamp(m_viewStart + visible * m_viewSpan, 0.0, 1.0);
         pc->playback_seek(trackFrac * length);
+        if (m_followPlayhead) recenter_on_playhead();
     }
 
     void stop_analysis() {
@@ -468,23 +461,19 @@ private:
                 audio_chunk_impl_temporary chunk;
                 std::unique_ptr<spectral_waveform::spectral_analyzer> analyzer;
                 std::vector<float> pcm;
-                unsigned sampleRate = 0;
-                unsigned channels = 0;
+                unsigned sampleRate = 0, channels = 0;
 
                 while (decoder->run(chunk, *aborter)) {
                     aborter->check();
                     if (chunk.is_empty()) continue;
-
                     if (!analyzer) {
                         sampleRate = chunk.get_sample_rate();
                         channels = chunk.get_channels();
                         if (sampleRate == 0 || channels == 0) continue;
                         analyzer = std::make_unique<spectral_waveform::spectral_analyzer>(sampleRate, channels);
                     }
-
-                    if (chunk.get_sample_rate() != sampleRate || chunk.get_channels() != channels) {
+                    if (chunk.get_sample_rate() != sampleRate || chunk.get_channels() != channels)
                         throw exception_unexpected_audio_format_change();
-                    }
 
                     const size_t used = chunk.get_used_size();
                     pcm.resize(used);
@@ -505,26 +494,25 @@ private:
                 msg << "foo_spectral_waveform: analysis failed: " << e.what();
                 console::print(msg);
             }
-
             m_analyzing.store(false);
-            if (!aborter->is_aborting() && targetWnd != nullptr) {
-                PostMessageW(targetWnd, kMsgAnalysisReady, 0, 0);
-            }
+            if (!aborter->is_aborting() && targetWnd != nullptr) PostMessageW(targetWnd, kMsgAnalysisReady, 0, 0);
         });
-
         invalidate_all();
     }
 
     void on_playback_new_track(metadb_handle_ptr track) override { start_analysis(track); }
-
     void on_playback_stop(play_control::t_stop_reason) override {
         stop_analysis();
         invalidate_all();
     }
-
-    void on_playback_seek(double) override { invalidate_playhead(); }
+    void on_playback_seek(double) override {
+        if (m_followPlayhead) recenter_on_playhead();
+        else invalidate_playhead();
+    }
     void on_playback_pause(bool) override { invalidate_playhead(); }
-    void on_playback_time(double) override { invalidate_playhead(); }
+    void on_playback_time(double) override {
+        if (!m_followPlayhead) invalidate_playhead();
+    }
 
     void invalidate_all() {
         if (m_wnd != nullptr) {
@@ -539,6 +527,7 @@ private:
 
     double m_viewStart = 0.0;
     double m_viewSpan = 1.0;
+    bool m_followPlayhead = false;
     bool m_dragging = false;
     bool m_dragMoved = false;
     int m_dragStartX = 0;
@@ -555,26 +544,17 @@ class spectral_waveform_element : public ui_element {
 public:
     GUID get_guid() override { return guid_spectral_waveform_ui; }
     GUID get_subclass() override { return ui_element_subclass_playback_visualisation; }
-
     void get_name(pfc::string_base& out) override { out = "Spectral Waveform"; }
-
-    ui_element_instance::ptr instantiate(
-        HWND parent,
-        ui_element_config::ptr cfg,
+    ui_element_instance::ptr instantiate(HWND parent, ui_element_config::ptr cfg,
         ui_element_instance_callback::ptr callback) override {
         return new service_impl_t<spectral_waveform_instance>(parent, cfg, callback);
     }
-
     ui_element_config::ptr get_default_configuration() override {
         return ui_element_config::g_create_empty(guid_spectral_waveform_ui);
     }
-
-    ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override {
-        return nullptr;
-    }
-
+    ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform seekbar with mouse-wheel zoom, drag panning and Space-to-center.";
+        out = "Frequency-colored waveform with mouse-wheel zoom, drag panning, Space-to-follow and centered scrolling.";
         return true;
     }
 };
