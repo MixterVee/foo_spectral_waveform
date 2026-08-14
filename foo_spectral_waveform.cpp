@@ -14,7 +14,7 @@ VALIDATE_COMPONENT_FILENAME("foo_spectral_waveform.dll");
 
 namespace {
 
-class spectral_initquit final : public initquit {
+class spectral_initquit : public initquit {
 public:
     void on_init() override {
         console::print("foo_spectral_waveform: v0.1.0-alpha loaded");
