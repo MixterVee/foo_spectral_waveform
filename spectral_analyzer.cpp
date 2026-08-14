@@ -111,9 +111,29 @@ waveform_data spectral_analyzer::finish() {
         std::vector<std::uint16_t> rmsValues;
         rmsValues.reserve(m_points.size());
         for (const auto& p : m_points) rmsValues.push_back(p.rms);
+
         const std::size_t index = (rmsValues.size() - 1) * 95 / 100;
         std::nth_element(rmsValues.begin(), rmsValues.begin() + index, rmsValues.end());
         out.rms_reference = std::max<std::uint16_t>(1, rmsValues[index]);
+
+        const double reference = static_cast<double>(out.rms_reference) / 65535.0;
+        const double referenceDb = 20.0 * std::log10(std::max(reference, 1.0e-6));
+        constexpr double kDisplayRangeDb = 30.0;
+
+        for (auto& p : m_points) {
+            const double rms = static_cast<double>(p.rms) / 65535.0;
+            const double peak = static_cast<double>(p.peak) / 65535.0;
+            const double rmsDb = 20.0 * std::log10(std::max(rms, 1.0e-6));
+
+            const double loudness = std::clamp(
+                (rmsDb - (referenceDb - kDisplayRangeDb)) / kDisplayRangeDb,
+                0.0, 1.0);
+
+            // RMS carries most of the visual height; a small true-peak contribution
+            // preserves kick/snare transients without making mastered tracks look full-scale everywhere.
+            const double displayAmplitude = std::clamp(0.88 * loudness + 0.12 * peak, 0.0, 1.0);
+            p.peak = static_cast<std::uint16_t>(std::lround(displayAmplitude * 65535.0));
+        }
     }
 
     out.points = std::move(m_points);
