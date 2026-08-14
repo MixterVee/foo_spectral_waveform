@@ -24,6 +24,7 @@ static const GUID guid_spectral_waveform_ui =
 static const wchar_t* kWindowClassName = L"foo_spectral_waveform_ui_v03";
 static constexpr UINT kMsgAnalysisReady = WM_APP + 0x351;
 static constexpr double kMinViewSpan = 0.02;
+static constexpr double kKeyboardPanFraction = 0.10;
 
 class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
 public:
@@ -118,10 +119,27 @@ private:
         case WM_MOUSEWHEEL:
             zoom_from_wheel(GET_WHEEL_DELTA_WPARAM(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
+        case WM_GETDLGCODE:
+            return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_KEYDOWN:
-            if (wp == VK_SPACE && m_viewSpan < 0.9995) {
-                m_followPlayhead = true;
-                recenter_on_playhead();
+            switch (wp) {
+            case VK_SPACE:
+                if (m_viewSpan < 0.9995) {
+                    m_followPlayhead = true;
+                    recenter_on_playhead();
+                }
+                return 0;
+            case VK_UP:
+                zoom_from_keyboard(true);
+                return 0;
+            case VK_DOWN:
+                zoom_from_keyboard(false);
+                return 0;
+            case VK_LEFT:
+                pan_from_keyboard(-1);
+                return 0;
+            case VK_RIGHT:
+                pan_from_keyboard(1);
                 return 0;
             }
             break;
@@ -258,6 +276,40 @@ private:
             return;
         }
         invalidate_all();
+    }
+
+    void zoom_from_keyboard(bool zoomIn) {
+        if (m_wnd == nullptr) return;
+
+        double anchor = m_viewStart + m_viewSpan * 0.5;
+        double positionFrac = 0.0;
+        if (playback_fraction(positionFrac) &&
+            positionFrac >= m_viewStart && positionFrac <= view_end()) {
+            anchor = positionFrac;
+        }
+
+        const double anchorX = std::clamp((anchor - m_viewStart) / m_viewSpan, 0.0, 1.0);
+        const double factor = zoomIn ? 0.80 : 1.25;
+        const double newSpan = std::clamp(m_viewSpan * factor, kMinViewSpan, 1.0);
+
+        if (newSpan >= 0.9995) {
+            reset_view();
+        } else {
+            const bool keepFollow = m_followPlayhead;
+            m_viewSpan = newSpan;
+            m_viewStart = anchor - anchorX * m_viewSpan;
+            clamp_view();
+            m_followPlayhead = keepFollow;
+        }
+        invalidate_all();
+    }
+
+    void pan_from_keyboard(int direction) {
+        if (direction == 0 || m_viewSpan >= 0.9995) return;
+        m_followPlayhead = false;
+        m_viewStart += static_cast<double>(direction) * m_viewSpan * kKeyboardPanFraction;
+        clamp_view();
+        invalidate_frame();
     }
 
     void begin_drag(int x) {
@@ -444,8 +496,6 @@ private:
             render_columns(m_waveDC, waveform, 0, amount, width, height);
         }
 
-        // Record the view represented by the integer pixel shift. Any sub-pixel
-        // remainder is kept for the next frame instead of accumulating drift.
         m_bufferViewStart += (static_cast<double>(shift) / width) * m_viewSpan;
         return true;
     }
@@ -666,7 +716,7 @@ public:
     }
     ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform with mouse-wheel zoom, drag panning, Space-to-follow and cached centered scrolling.";
+        out = "Frequency-colored waveform with mouse-wheel/arrow-key zoom, drag/arrow panning, Space-to-follow and cached centered scrolling.";
         return true;
     }
 };
