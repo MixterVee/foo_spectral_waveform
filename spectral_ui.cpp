@@ -48,6 +48,7 @@ public:
 
     ~spectral_waveform_instance() {
         stop_analysis();
+        release_back_buffer();
         if (m_wnd != nullptr) {
             KillTimer(m_wnd, 1);
             DestroyWindow(m_wnd);
@@ -186,7 +187,7 @@ private:
         if (!playback_fraction(positionFrac)) return;
         m_viewStart = positionFrac - m_viewSpan * 0.5;
         clamp_view();
-        invalidate_all();
+        invalidate_frame();
     }
 
     bool update_follow_view() {
@@ -199,7 +200,7 @@ private:
         m_viewStart = positionFrac - m_viewSpan * 0.5;
         clamp_view();
         if (std::abs(m_viewStart - oldStart) < 1.0e-9) return false;
-        invalidate_all();
+        invalidate_frame();
         return true;
     }
 
@@ -220,7 +221,6 @@ private:
         GetClientRect(m_wnd, &rc);
         const int newX = current_playhead_x(rc.right - rc.left);
         if (newX == m_lastPlayX) return;
-
         auto invalidate_strip = [this, &rc](int x) {
             if (x < 0) return;
             RECT strip{x - 3, rc.top, x + 4, rc.bottom};
@@ -352,6 +352,104 @@ private:
         DrawTextW(dc, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
+    void release_back_buffer() {
+        if (m_waveDC != nullptr) {
+            if (m_waveOldBitmap != nullptr) SelectObject(m_waveDC, m_waveOldBitmap);
+            m_waveOldBitmap = nullptr;
+            if (m_waveBitmap != nullptr) DeleteObject(m_waveBitmap);
+            m_waveBitmap = nullptr;
+            DeleteDC(m_waveDC);
+            m_waveDC = nullptr;
+        }
+        m_bufferWidth = 0;
+        m_bufferHeight = 0;
+        m_bufferValid = false;
+    }
+
+    bool ensure_back_buffer(HDC referenceDC, int width, int height) {
+        if (width <= 0 || height <= 0) return false;
+        if (m_waveDC != nullptr && m_bufferWidth == width && m_bufferHeight == height) return true;
+
+        release_back_buffer();
+        m_waveDC = CreateCompatibleDC(referenceDC);
+        if (m_waveDC == nullptr) return false;
+        m_waveBitmap = CreateCompatibleBitmap(referenceDC, width, height);
+        if (m_waveBitmap == nullptr) {
+            release_back_buffer();
+            return false;
+        }
+        m_waveOldBitmap = SelectObject(m_waveDC, m_waveBitmap);
+        m_bufferWidth = width;
+        m_bufferHeight = height;
+        m_bufferValid = false;
+        return true;
+    }
+
+    void clear_columns(HDC dc, int x0, int x1, int height) const {
+        x0 = std::max(0, x0);
+        x1 = std::min(m_bufferWidth, x1);
+        if (x1 <= x0) return;
+        RECT r{x0, 0, x1, height};
+        HBRUSH brush = CreateSolidBrush(query_color(ui_color_background, COLOR_WINDOW));
+        FillRect(dc, &r, brush);
+        DeleteObject(brush);
+    }
+
+    void render_columns(HDC dc, const spectral_waveform::waveform_data& waveform,
+        int x0, int x1, int width, int height) {
+        x0 = std::max(0, x0);
+        x1 = std::min(width, x1);
+        if (x1 <= x0) return;
+
+        clear_columns(dc, x0, x1, height);
+        const int mid = height / 2;
+        const int usable = std::max(2, height - 8);
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+        for (int x = x0; x < x1; ++x) {
+            const auto point = aggregate_point(waveform, x, width);
+            const double amp = display_amplitude(point);
+            const int half = static_cast<int>(std::lround(amp * usable * 0.5));
+            if (half <= 0) continue;
+            const auto color = spectral_waveform::color_for_point(point);
+            SetDCPenColor(dc, RGB(color.r, color.g, color.b));
+            MoveToEx(dc, x, mid - half, nullptr);
+            LineTo(dc, x, mid + half + 1);
+        }
+        SelectObject(dc, oldPen);
+    }
+
+    void rebuild_waveform_buffer(const spectral_waveform::waveform_data& waveform,
+        int width, int height) {
+        render_columns(m_waveDC, waveform, 0, width, width, height);
+        m_bufferViewStart = m_viewStart;
+        m_bufferViewSpan = m_viewSpan;
+        m_bufferValid = true;
+    }
+
+    bool scroll_waveform_buffer(const spectral_waveform::waveform_data& waveform,
+        int width, int height) {
+        if (!m_bufferValid || std::abs(m_bufferViewSpan - m_viewSpan) > 1.0e-12) return false;
+
+        const double exactShift = ((m_viewStart - m_bufferViewStart) / m_viewSpan) * width;
+        const int shift = static_cast<int>(std::lround(exactShift));
+        if (shift == 0) return true;
+        if (std::abs(shift) >= width) return false;
+
+        if (shift > 0) {
+            BitBlt(m_waveDC, 0, 0, width - shift, height, m_waveDC, shift, 0, SRCCOPY);
+            render_columns(m_waveDC, waveform, width - shift, width, width, height);
+        } else {
+            const int amount = -shift;
+            BitBlt(m_waveDC, amount, 0, width - amount, height, m_waveDC, 0, 0, SRCCOPY);
+            render_columns(m_waveDC, waveform, 0, amount, width, height);
+        }
+
+        // Record the view represented by the integer pixel shift. Any sub-pixel
+        // remainder is kept for the next frame instead of accumulating drift.
+        m_bufferViewStart += (static_cast<double>(shift) / width) * m_viewSpan;
+        return true;
+    }
+
     void paint() {
         PAINTSTRUCT ps{};
         HDC dc = BeginPaint(m_wnd, &ps);
@@ -361,78 +459,45 @@ private:
         GetClientRect(m_wnd, &rc);
         const int width = std::max(0L, rc.right - rc.left);
         const int height = std::max(0L, rc.bottom - rc.top);
-
-        HDC bufferDC = nullptr;
-        HBITMAP bufferBitmap = nullptr;
-        HGDIOBJ oldBitmap = nullptr;
-        HDC drawDC = dc;
-
-        if (width > 0 && height > 0) {
-            bufferDC = CreateCompatibleDC(dc);
-            if (bufferDC != nullptr) {
-                bufferBitmap = CreateCompatibleBitmap(dc, width, height);
-                if (bufferBitmap != nullptr) {
-                    oldBitmap = SelectObject(bufferDC, bufferBitmap);
-                    drawDC = bufferDC;
-                } else {
-                    DeleteDC(bufferDC);
-                    bufferDC = nullptr;
-                }
-            }
-        }
-
-        const COLORREF bg = query_color(ui_color_background, COLOR_WINDOW);
-        HBRUSH bgBrush = CreateSolidBrush(bg);
-        FillRect(drawDC, bufferDC != nullptr ? &rc : &ps.rcPaint, bgBrush);
-        DeleteObject(bgBrush);
-
         const auto waveform = waveform_snapshot();
-        if (width > 0 && height > 0) {
+
+        if (width > 0 && height > 0 && ensure_back_buffer(dc, width, height)) {
             if (waveform && !waveform->points.empty()) {
-                const int mid = height / 2;
-                const int usable = std::max(2, height - 8);
-                const int xStart = bufferDC != nullptr ? 0 : std::max(0L, ps.rcPaint.left);
-                const int xEnd = bufferDC != nullptr ? width : std::min(width, static_cast<int>(ps.rcPaint.right));
-
-                HGDIOBJ oldPen = SelectObject(drawDC, GetStockObject(DC_PEN));
-                for (int x = xStart; x < xEnd; ++x) {
-                    const auto point = aggregate_point(*waveform, x, width);
-                    const double amp = display_amplitude(point);
-                    const int half = static_cast<int>(std::lround(amp * usable * 0.5));
-                    if (half <= 0) continue;
-                    const auto color = spectral_waveform::color_for_point(point);
-                    SetDCPenColor(drawDC, RGB(color.r, color.g, color.b));
-                    MoveToEx(drawDC, x, mid - half, nullptr);
-                    LineTo(drawDC, x, mid + half + 1);
+                if (!scroll_waveform_buffer(*waveform, width, height)) {
+                    rebuild_waveform_buffer(*waveform, width, height);
                 }
-                SelectObject(drawDC, oldPen);
-            } else if (m_analyzing.load()) {
-                draw_status_text(drawDC, rc, L"Analyzing waveform...");
+            } else {
+                clear_columns(m_waveDC, 0, width, height);
+                if (m_analyzing.load()) draw_status_text(m_waveDC, rc, L"Analyzing waveform...");
+                m_bufferViewStart = m_viewStart;
+                m_bufferViewSpan = m_viewSpan;
+                m_bufferValid = true;
             }
 
-            const int playX = current_playhead_x(width);
-            if (playX >= 0) {
-                const COLORREF accent = query_color(ui_color_highlight, COLOR_HIGHLIGHT);
-                HPEN pen = CreatePen(PS_SOLID, 2, accent);
-                HGDIOBJ old = SelectObject(drawDC, pen);
-                MoveToEx(drawDC, playX, 0, nullptr);
-                LineTo(drawDC, playX, height);
-                SelectObject(drawDC, old);
-                DeleteObject(pen);
-                m_lastPlayX = playX;
-            }
-        }
-
-        if (bufferDC != nullptr) {
             const int paintWidth = std::max(0L, ps.rcPaint.right - ps.rcPaint.left);
             const int paintHeight = std::max(0L, ps.rcPaint.bottom - ps.rcPaint.top);
             if (paintWidth > 0 && paintHeight > 0) {
                 BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, paintWidth, paintHeight,
-                    bufferDC, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+                    m_waveDC, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
             }
-            SelectObject(bufferDC, oldBitmap);
-            DeleteObject(bufferBitmap);
-            DeleteDC(bufferDC);
+        } else {
+            HBRUSH bg = CreateSolidBrush(query_color(ui_color_background, COLOR_WINDOW));
+            FillRect(dc, &ps.rcPaint, bg);
+            DeleteObject(bg);
+        }
+
+        if (width > 0 && height > 0) {
+            const int playX = current_playhead_x(width);
+            if (playX >= 0) {
+                const COLORREF accent = query_color(ui_color_highlight, COLOR_HIGHLIGHT);
+                HPEN pen = CreatePen(PS_SOLID, 2, accent);
+                HGDIOBJ old = SelectObject(dc, pen);
+                MoveToEx(dc, playX, 0, nullptr);
+                LineTo(dc, playX, height);
+                SelectObject(dc, old);
+                DeleteObject(pen);
+                m_lastPlayX = playX;
+            }
         }
 
         EndPaint(m_wnd, &ps);
@@ -473,6 +538,7 @@ private:
         stop_analysis();
         clear_waveform();
         reset_view();
+        m_bufferValid = false;
         if (track.is_empty()) {
             invalidate_all();
             return;
@@ -535,7 +601,7 @@ private:
     void on_playback_new_track(metadb_handle_ptr track) override { start_analysis(track); }
     void on_playback_stop(play_control::t_stop_reason) override {
         stop_analysis();
-        invalidate_all();
+        invalidate_all(false);
     }
     void on_playback_seek(double) override {
         if (m_followPlayhead) recenter_on_playhead();
@@ -546,11 +612,16 @@ private:
         if (!m_followPlayhead) invalidate_playhead();
     }
 
-    void invalidate_all() {
+    void invalidate_frame() {
         if (m_wnd != nullptr) {
             m_lastPlayX = -1;
             InvalidateRect(m_wnd, nullptr, FALSE);
         }
+    }
+
+    void invalidate_all(bool discardBuffer = true) {
+        if (discardBuffer) m_bufferValid = false;
+        invalidate_frame();
     }
 
     HWND m_wnd = nullptr;
@@ -564,6 +635,15 @@ private:
     bool m_dragMoved = false;
     int m_dragStartX = 0;
     double m_dragStartView = 0.0;
+
+    HDC m_waveDC = nullptr;
+    HBITMAP m_waveBitmap = nullptr;
+    HGDIOBJ m_waveOldBitmap = nullptr;
+    int m_bufferWidth = 0;
+    int m_bufferHeight = 0;
+    bool m_bufferValid = false;
+    double m_bufferViewStart = 0.0;
+    double m_bufferViewSpan = 1.0;
 
     mutable std::mutex m_waveformMutex;
     std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
@@ -586,7 +666,7 @@ public:
     }
     ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform with mouse-wheel zoom, drag panning, Space-to-follow and centered scrolling.";
+        out = "Frequency-colored waveform with mouse-wheel zoom, drag panning, Space-to-follow and cached centered scrolling.";
         return true;
     }
 };
