@@ -230,13 +230,14 @@ private:
         const double peak = point.peak / 65535.0;
         if (rms <= 1.0e-8 && peak <= 1.0e-8) return 0.0;
 
-        // Absolute RMS scale instead of per-track normalization. A typical modern
-        // master around -10 dBFS RMS lands near 65-70% height instead of the top.
+        // Keep substantially more headroom than the first RMS build. The raw
+        // analysis values remain untouched; only this display curve controls height.
+        // About -10 dBFS RMS lands near half-height, -6 dBFS near two-thirds.
         const double db = 20.0 * std::log10(std::max(rms, 1.0e-8));
-        const double normalized = std::clamp((db + 48.0) / 45.0, 0.0, 1.0);
-        const double loudnessShape = std::pow(normalized, 2.15);
+        const double normalized = std::clamp((db + 42.0) / 42.0, 0.0, 1.0);
+        const double loudnessShape = std::pow(normalized, 2.60);
         const double transient = std::sqrt(std::clamp(peak, 0.0, 1.0));
-        return std::clamp(0.95 * loudnessShape + 0.05 * transient, 0.0, 1.0);
+        return std::clamp(0.94 * loudnessShape + 0.06 * transient, 0.0, 0.92);
     }
 
     void draw_status_text(HDC dc, const RECT& rc, const wchar_t* text) const {
