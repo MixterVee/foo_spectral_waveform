@@ -362,9 +362,28 @@ private:
         const int width = std::max(0L, rc.right - rc.left);
         const int height = std::max(0L, rc.bottom - rc.top);
 
+        HDC bufferDC = nullptr;
+        HBITMAP bufferBitmap = nullptr;
+        HGDIOBJ oldBitmap = nullptr;
+        HDC drawDC = dc;
+
+        if (width > 0 && height > 0) {
+            bufferDC = CreateCompatibleDC(dc);
+            if (bufferDC != nullptr) {
+                bufferBitmap = CreateCompatibleBitmap(dc, width, height);
+                if (bufferBitmap != nullptr) {
+                    oldBitmap = SelectObject(bufferDC, bufferBitmap);
+                    drawDC = bufferDC;
+                } else {
+                    DeleteDC(bufferDC);
+                    bufferDC = nullptr;
+                }
+            }
+        }
+
         const COLORREF bg = query_color(ui_color_background, COLOR_WINDOW);
         HBRUSH bgBrush = CreateSolidBrush(bg);
-        FillRect(dc, &ps.rcPaint, bgBrush);
+        FillRect(drawDC, bufferDC != nullptr ? &rc : &ps.rcPaint, bgBrush);
         DeleteObject(bgBrush);
 
         const auto waveform = waveform_snapshot();
@@ -372,37 +391,50 @@ private:
             if (waveform && !waveform->points.empty()) {
                 const int mid = height / 2;
                 const int usable = std::max(2, height - 8);
-                const int xStart = std::max(0L, ps.rcPaint.left);
-                const int xEnd = std::min(width, static_cast<int>(ps.rcPaint.right));
+                const int xStart = bufferDC != nullptr ? 0 : std::max(0L, ps.rcPaint.left);
+                const int xEnd = bufferDC != nullptr ? width : std::min(width, static_cast<int>(ps.rcPaint.right));
 
-                HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+                HGDIOBJ oldPen = SelectObject(drawDC, GetStockObject(DC_PEN));
                 for (int x = xStart; x < xEnd; ++x) {
                     const auto point = aggregate_point(*waveform, x, width);
                     const double amp = display_amplitude(point);
                     const int half = static_cast<int>(std::lround(amp * usable * 0.5));
                     if (half <= 0) continue;
                     const auto color = spectral_waveform::color_for_point(point);
-                    SetDCPenColor(dc, RGB(color.r, color.g, color.b));
-                    MoveToEx(dc, x, mid - half, nullptr);
-                    LineTo(dc, x, mid + half + 1);
+                    SetDCPenColor(drawDC, RGB(color.r, color.g, color.b));
+                    MoveToEx(drawDC, x, mid - half, nullptr);
+                    LineTo(drawDC, x, mid + half + 1);
                 }
-                SelectObject(dc, oldPen);
+                SelectObject(drawDC, oldPen);
             } else if (m_analyzing.load()) {
-                draw_status_text(dc, rc, L"Analyzing waveform...");
+                draw_status_text(drawDC, rc, L"Analyzing waveform...");
             }
 
             const int playX = current_playhead_x(width);
-            if (playX >= 0 && playX >= ps.rcPaint.left - 2 && playX <= ps.rcPaint.right + 2) {
+            if (playX >= 0) {
                 const COLORREF accent = query_color(ui_color_highlight, COLOR_HIGHLIGHT);
                 HPEN pen = CreatePen(PS_SOLID, 2, accent);
-                HGDIOBJ old = SelectObject(dc, pen);
-                MoveToEx(dc, playX, 0, nullptr);
-                LineTo(dc, playX, height);
-                SelectObject(dc, old);
+                HGDIOBJ old = SelectObject(drawDC, pen);
+                MoveToEx(drawDC, playX, 0, nullptr);
+                LineTo(drawDC, playX, height);
+                SelectObject(drawDC, old);
                 DeleteObject(pen);
                 m_lastPlayX = playX;
             }
         }
+
+        if (bufferDC != nullptr) {
+            const int paintWidth = std::max(0L, ps.rcPaint.right - ps.rcPaint.left);
+            const int paintHeight = std::max(0L, ps.rcPaint.bottom - ps.rcPaint.top);
+            if (paintWidth > 0 && paintHeight > 0) {
+                BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, paintWidth, paintHeight,
+                    bufferDC, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+            }
+            SelectObject(bufferDC, oldBitmap);
+            DeleteObject(bufferBitmap);
+            DeleteDC(bufferDC);
+        }
+
         EndPaint(m_wnd, &ps);
     }
 
