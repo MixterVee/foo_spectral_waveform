@@ -61,6 +61,7 @@ public:
 
     void notify(const GUID& what, t_size, const void*, t_size) override {
         if (what == ui_element_notify_colors_changed && m_wnd != nullptr) {
+            m_lastPlayX = -1;
             InvalidateRect(m_wnd, nullptr, FALSE);
         }
     }
@@ -108,6 +109,10 @@ private:
             paint();
             return 0;
         case WM_TIMER:
+            invalidate_playhead();
+            return 0;
+        case WM_SIZE:
+            m_lastPlayX = -1;
             InvalidateRect(wnd, nullptr, FALSE);
             return 0;
         case WM_LBUTTONDOWN:
@@ -130,6 +135,41 @@ private:
         return GetSysColor(fallback);
     }
 
+    int current_playhead_x(int width) const {
+        if (width <= 0) return -1;
+
+        auto pc = playback_control::get();
+        if (!pc->is_playing()) return -1;
+
+        const double length = pc->playback_get_length_ex();
+        if (length <= 0.0) return -1;
+
+        const double pos = pc->playback_get_position();
+        const double frac = std::clamp(pos / length, 0.0, 1.0);
+        return static_cast<int>(frac * std::max(0, width - 1));
+    }
+
+    void invalidate_playhead() {
+        if (m_wnd == nullptr) return;
+
+        RECT rc{};
+        GetClientRect(m_wnd, &rc);
+        const int width = rc.right - rc.left;
+        const int newX = current_playhead_x(width);
+
+        if (newX == m_lastPlayX) return;
+
+        auto invalidate_strip = [this, &rc](int x) {
+            if (x < 0) return;
+            RECT strip{ x - 3, rc.top, x + 4, rc.bottom };
+            InvalidateRect(m_wnd, &strip, FALSE);
+        };
+
+        invalidate_strip(m_lastPlayX);
+        invalidate_strip(newX);
+        m_lastPlayX = newX;
+    }
+
     void paint() {
         PAINTSTRUCT ps{};
         HDC dc = BeginPaint(m_wnd, &ps);
@@ -142,16 +182,18 @@ private:
 
         const COLORREF bg = query_color(ui_color_background, COLOR_WINDOW);
         HBRUSH bgBrush = CreateSolidBrush(bg);
-        FillRect(dc, &rc, bgBrush);
+        FillRect(dc, &ps.rcPaint, bgBrush);
         DeleteObject(bgBrush);
 
         if (width > 0 && height > 0) {
             const int mid = height / 2;
             const int usable = std::max(2, height - 8);
+            const int xStart = std::max(0L, ps.rcPaint.left);
+            const int xEnd = std::min(width, static_cast<int>(ps.rcPaint.right));
 
             // v0.2 UI scaffold: deterministic multiband-looking bars.
             // Real decoded spectral points replace these in the next step.
-            for (int x = 0; x < width; ++x) {
+            for (int x = xStart; x < xEnd; ++x) {
                 const double t = static_cast<double>(x) / std::max(1, width - 1);
                 const double a = 0.26 + 0.34 * std::abs(std::sin(t * 19.0))
                                      + 0.22 * std::abs(std::sin(t * 53.0 + 0.8));
@@ -174,21 +216,16 @@ private:
                 DeleteObject(pen);
             }
 
-            auto pc = playback_control::get();
-            if (pc->is_playing()) {
-                const double length = pc->playback_get_length_ex();
-                const double pos = pc->playback_get_position();
-                if (length > 0.0) {
-                    const double frac = std::clamp(pos / length, 0.0, 1.0);
-                    const int playX = static_cast<int>(frac * std::max(0, width - 1));
-                    const COLORREF accent = query_color(ui_color_highlight, COLOR_HIGHLIGHT);
-                    HPEN pen = CreatePen(PS_SOLID, 2, accent);
-                    HGDIOBJ old = SelectObject(dc, pen);
-                    MoveToEx(dc, playX, 0, nullptr);
-                    LineTo(dc, playX, height);
-                    SelectObject(dc, old);
-                    DeleteObject(pen);
-                }
+            const int playX = current_playhead_x(width);
+            if (playX >= 0 && playX >= ps.rcPaint.left - 2 && playX <= ps.rcPaint.right + 2) {
+                const COLORREF accent = query_color(ui_color_highlight, COLOR_HIGHLIGHT);
+                HPEN pen = CreatePen(PS_SOLID, 2, accent);
+                HGDIOBJ old = SelectObject(dc, pen);
+                MoveToEx(dc, playX, 0, nullptr);
+                LineTo(dc, playX, height);
+                SelectObject(dc, old);
+                DeleteObject(pen);
+                m_lastPlayX = playX;
             }
         }
 
@@ -211,17 +248,21 @@ private:
         pc->playback_seek(frac * length);
     }
 
-    void on_playback_new_track(metadb_handle_ptr) override { invalidate(); }
-    void on_playback_stop(play_control::t_stop_reason) override { invalidate(); }
-    void on_playback_seek(double) override { invalidate(); }
-    void on_playback_pause(bool) override { invalidate(); }
-    void on_playback_time(double) override { invalidate(); }
+    void on_playback_new_track(metadb_handle_ptr) override { invalidate_all(); }
+    void on_playback_stop(play_control::t_stop_reason) override { invalidate_all(); }
+    void on_playback_seek(double) override { invalidate_playhead(); }
+    void on_playback_pause(bool) override { invalidate_playhead(); }
+    void on_playback_time(double) override { invalidate_playhead(); }
 
-    void invalidate() {
-        if (m_wnd != nullptr) InvalidateRect(m_wnd, nullptr, FALSE);
+    void invalidate_all() {
+        if (m_wnd != nullptr) {
+            m_lastPlayX = -1;
+            InvalidateRect(m_wnd, nullptr, FALSE);
+        }
     }
 
     HWND m_wnd = nullptr;
+    int m_lastPlayX = -1;
     ui_element_instance_callback::ptr m_callback;
 };
 
