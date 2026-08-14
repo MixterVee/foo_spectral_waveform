@@ -40,7 +40,7 @@ public:
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             0, 0, 0, 0, parent, nullptr, core_api::get_my_instance(), this);
         if (m_wnd == nullptr) throw exception_win32(GetLastError());
-        SetTimer(m_wnd, 1, 50, nullptr);
+        SetTimer(m_wnd, 1, 16, nullptr);
 
         metadb_handle_ptr nowPlaying;
         if (playback_control::get()->get_now_playing(nowPlaying)) start_analysis(nowPlaying);
