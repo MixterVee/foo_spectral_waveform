@@ -85,6 +85,7 @@
     <ClCompile Include="foo_spectral_waveform.cpp" />
     <ClCompile Include="spectral_analyzer.cpp" />
     <ClCompile Include="spectral_palette.cpp" />
+    <ClCompile Include="spectral_ui.cpp" />
   </ItemGroup>
 
   <ItemGroup>
