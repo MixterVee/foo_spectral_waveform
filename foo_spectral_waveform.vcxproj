@@ -67,6 +67,7 @@
       <AdditionalLibraryDirectories>
         sdk\foobar2000\SDK\x64\Release;
         sdk\foobar2000\foobar2000_component_client\x64\Release;
+        sdk\foobar2000\helpers\x64\Release;
         sdk\pfc\x64\Release;
         sdk\foobar2000\shared;
         %(AdditionalLibraryDirectories)
@@ -74,6 +75,7 @@
       <AdditionalDependencies>
         foobar2000_SDK.lib;
         foobar2000_component_client.lib;
+        foobar2000_sdk_helpers.lib;
         pfc.lib;
         shared-x64.lib;
         %(AdditionalDependencies)
