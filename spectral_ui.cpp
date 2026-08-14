@@ -23,6 +23,7 @@ static const GUID guid_spectral_waveform_ui =
 
 static const wchar_t* kWindowClassName = L"foo_spectral_waveform_ui_v02";
 static constexpr UINT kMsgAnalysisReady = WM_APP + 0x351;
+static constexpr double kMinViewSpan = 0.02; // 50x maximum horizontal zoom.
 
 class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
 public:
@@ -57,7 +58,6 @@ public:
     }
 
     HWND get_wnd() override { return m_wnd; }
-
     void set_configuration(ui_element_config::ptr) override {}
 
     ui_element_config::ptr get_configuration() override {
@@ -130,8 +130,21 @@ private:
             m_lastPlayX = -1;
             InvalidateRect(wnd, nullptr, FALSE);
             return 0;
+        case WM_MOUSEWHEEL:
+            zoom_from_wheel(GET_WHEEL_DELTA_WPARAM(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            return 0;
         case WM_LBUTTONDOWN:
-            seek_from_x(GET_X_LPARAM(lp));
+            begin_drag(GET_X_LPARAM(lp));
+            return 0;
+        case WM_MOUSEMOVE:
+            if (m_dragging && (wp & MK_LBUTTON)) update_drag(GET_X_LPARAM(lp));
+            return 0;
+        case WM_LBUTTONUP:
+            end_drag(GET_X_LPARAM(lp));
+            return 0;
+        case WM_CAPTURECHANGED:
+            m_dragging = false;
+            m_dragMoved = false;
             return 0;
         case WM_LBUTTONDBLCLK:
             seek_from_x(GET_X_LPARAM(lp));
@@ -154,18 +167,34 @@ private:
         return GetSysColor(fallback);
     }
 
+    void reset_view() {
+        m_viewStart = 0.0;
+        m_viewSpan = 1.0;
+    }
+
+    double view_end() const {
+        return std::min(1.0, m_viewStart + m_viewSpan);
+    }
+
+    void clamp_view() {
+        m_viewSpan = std::clamp(m_viewSpan, kMinViewSpan, 1.0);
+        m_viewStart = std::clamp(m_viewStart, 0.0, 1.0 - m_viewSpan);
+        if (m_viewSpan > 0.9995) reset_view();
+    }
+
     int current_playhead_x(int width) const {
         if (width <= 0) return -1;
 
         auto pc = playback_control::get();
         if (!pc->is_playing()) return -1;
-
         const double length = pc->playback_get_length_ex();
         if (length <= 0.0) return -1;
 
-        const double pos = pc->playback_get_position();
-        const double frac = std::clamp(pos / length, 0.0, 1.0);
-        return static_cast<int>(frac * std::max(0, width - 1));
+        const double positionFrac = std::clamp(pc->playback_get_position() / length, 0.0, 1.0);
+        if (positionFrac < m_viewStart || positionFrac > view_end()) return -1;
+
+        const double visibleFrac = (positionFrac - m_viewStart) / m_viewSpan;
+        return static_cast<int>(visibleFrac * std::max(0, width - 1));
     }
 
     void invalidate_playhead() {
@@ -175,7 +204,6 @@ private:
         GetClientRect(m_wnd, &rc);
         const int width = rc.right - rc.left;
         const int newX = current_playhead_x(width);
-
         if (newX == m_lastPlayX) return;
 
         auto invalidate_strip = [this, &rc](int x) {
@@ -189,19 +217,84 @@ private:
         m_lastPlayX = newX;
     }
 
+    void zoom_from_wheel(short delta, int screenX, int screenY) {
+        if (delta == 0 || m_wnd == nullptr) return;
+
+        POINT pt{screenX, screenY};
+        ScreenToClient(m_wnd, &pt);
+        RECT rc{};
+        GetClientRect(m_wnd, &rc);
+        const int width = rc.right - rc.left;
+        if (width <= 1) return;
+
+        const double cursorX = std::clamp(static_cast<double>(pt.x) / static_cast<double>(width - 1), 0.0, 1.0);
+        const double anchor = m_viewStart + cursorX * m_viewSpan;
+        const double steps = static_cast<double>(delta) / WHEEL_DELTA;
+        const double factor = std::pow(0.80, steps);
+        const double newSpan = std::clamp(m_viewSpan * factor, kMinViewSpan, 1.0);
+
+        if (newSpan >= 0.9995) {
+            reset_view();
+        } else {
+            m_viewSpan = newSpan;
+            m_viewStart = anchor - cursorX * m_viewSpan;
+            clamp_view();
+        }
+
+        m_lastPlayX = -1;
+        InvalidateRect(m_wnd, nullptr, FALSE);
+    }
+
+    void begin_drag(int x) {
+        if (m_wnd == nullptr) return;
+        m_dragging = true;
+        m_dragMoved = false;
+        m_dragStartX = x;
+        m_dragStartView = m_viewStart;
+        SetCapture(m_wnd);
+    }
+
+    void update_drag(int x) {
+        if (!m_dragging || m_wnd == nullptr) return;
+        RECT rc{};
+        GetClientRect(m_wnd, &rc);
+        const int width = rc.right - rc.left;
+        if (width <= 1) return;
+
+        const int dx = x - m_dragStartX;
+        if (std::abs(dx) >= 3) m_dragMoved = true;
+        if (!m_dragMoved || m_viewSpan >= 0.9995) return;
+
+        m_viewStart = m_dragStartView - (static_cast<double>(dx) / static_cast<double>(width - 1)) * m_viewSpan;
+        clamp_view();
+        m_lastPlayX = -1;
+        InvalidateRect(m_wnd, nullptr, FALSE);
+    }
+
+    void end_drag(int x) {
+        if (!m_dragging) return;
+        const bool wasMoved = m_dragMoved;
+        m_dragging = false;
+        m_dragMoved = false;
+        if (GetCapture() == m_wnd) ReleaseCapture();
+        if (!wasMoved) seek_from_x(x);
+    }
+
     std::shared_ptr<const spectral_waveform::waveform_data> waveform_snapshot() const {
         std::lock_guard<std::mutex> lock(m_waveformMutex);
         return m_waveform;
     }
 
-    static spectral_waveform::waveform_point aggregate_point(
-        const spectral_waveform::waveform_data& data, int x, int width) {
+    spectral_waveform::waveform_point aggregate_point(
+        const spectral_waveform::waveform_data& data, int x, int width) const {
         spectral_waveform::waveform_point out{};
         const size_t count = data.points.size();
         if (count == 0 || width <= 0) return out;
 
-        size_t begin = (static_cast<size_t>(x) * count) / static_cast<size_t>(width);
-        size_t end = (static_cast<size_t>(x + 1) * count) / static_cast<size_t>(width);
+        const double leftFrac = m_viewStart + (static_cast<double>(x) / width) * m_viewSpan;
+        const double rightFrac = m_viewStart + (static_cast<double>(x + 1) / width) * m_viewSpan;
+        size_t begin = static_cast<size_t>(std::floor(leftFrac * count));
+        size_t end = static_cast<size_t>(std::ceil(rightFrac * count));
         begin = std::min(begin, count - 1);
         end = std::max(begin + 1, std::min(end, count));
 
@@ -230,9 +323,6 @@ private:
         const double peak = point.peak / 65535.0;
         if (rms <= 1.0e-8 && peak <= 1.0e-8) return 0.0;
 
-        // Keep substantially more headroom than the first RMS build. The raw
-        // analysis values remain untouched; only this display curve controls height.
-        // About -10 dBFS RMS lands near half-height, -6 dBFS near two-thirds.
         const double db = 20.0 * std::log10(std::max(rms, 1.0e-8));
         const double normalized = std::clamp((db + 42.0) / 42.0, 0.0, 1.0);
         const double loudnessShape = std::pow(normalized, 2.60);
@@ -263,7 +353,6 @@ private:
         DeleteObject(bgBrush);
 
         const auto waveform = waveform_snapshot();
-
         if (width > 0 && height > 0) {
             if (waveform && !waveform->points.empty()) {
                 const int mid = height / 2;
@@ -316,8 +405,9 @@ private:
         const double length = pc->playback_get_length_ex();
         if (length <= 0.0) return;
 
-        const double frac = std::clamp(static_cast<double>(x) / static_cast<double>(width - 1), 0.0, 1.0);
-        pc->playback_seek(frac * length);
+        const double visible = std::clamp(static_cast<double>(x) / static_cast<double>(width - 1), 0.0, 1.0);
+        const double trackFrac = std::clamp(m_viewStart + visible * m_viewSpan, 0.0, 1.0);
+        pc->playback_seek(trackFrac * length);
     }
 
     void stop_analysis() {
@@ -336,6 +426,7 @@ private:
     void start_analysis(metadb_handle_ptr track) {
         stop_analysis();
         clear_waveform();
+        reset_view();
         if (track.is_empty()) {
             invalidate_all();
             return;
@@ -350,8 +441,7 @@ private:
             try {
                 const t_uint32 decodeFlags = input_flag_simpledecode;
                 service_ptr_t<input_decoder> decoder;
-                input_entry::g_open_for_decoding(
-                    decoder, nullptr, track->get_path(), *aborter);
+                input_entry::g_open_for_decoding(decoder, nullptr, track->get_path(), *aborter);
                 decoder->initialize(track->get_subsong_index(), decodeFlags, *aborter);
 
                 audio_chunk_impl_temporary chunk;
@@ -378,19 +468,15 @@ private:
                     const size_t used = chunk.get_used_size();
                     pcm.resize(used);
                     const audio_sample* src = chunk.get_data();
-                    for (size_t i = 0; i < used; ++i) {
-                        pcm[i] = static_cast<float>(src[i]);
-                    }
+                    for (size_t i = 0; i < used; ++i) pcm[i] = static_cast<float>(src[i]);
                     analyzer->feed(pcm.data(), chunk.get_sample_count());
                 }
 
                 aborter->check();
                 if (analyzer) {
                     auto result = std::make_shared<spectral_waveform::waveform_data>(analyzer->finish());
-                    {
-                        std::lock_guard<std::mutex> lock(m_waveformMutex);
-                        m_waveform = std::move(result);
-                    }
+                    std::lock_guard<std::mutex> lock(m_waveformMutex);
+                    m_waveform = std::move(result);
                 }
             } catch (exception_aborted const&) {
             } catch (std::exception const& e) {
@@ -408,9 +494,7 @@ private:
         invalidate_all();
     }
 
-    void on_playback_new_track(metadb_handle_ptr track) override {
-        start_analysis(track);
-    }
+    void on_playback_new_track(metadb_handle_ptr track) override { start_analysis(track); }
 
     void on_playback_stop(play_control::t_stop_reason) override {
         stop_analysis();
@@ -432,6 +516,13 @@ private:
     int m_lastPlayX = -1;
     ui_element_instance_callback::ptr m_callback;
 
+    double m_viewStart = 0.0;
+    double m_viewSpan = 1.0;
+    bool m_dragging = false;
+    bool m_dragMoved = false;
+    int m_dragStartX = 0;
+    double m_dragStartView = 0.0;
+
     mutable std::mutex m_waveformMutex;
     std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
     std::thread m_worker;
@@ -444,9 +535,7 @@ public:
     GUID get_guid() override { return guid_spectral_waveform_ui; }
     GUID get_subclass() override { return ui_element_subclass_playback_visualisation; }
 
-    void get_name(pfc::string_base& out) override {
-        out = "Spectral Waveform";
-    }
+    void get_name(pfc::string_base& out) override { out = "Spectral Waveform"; }
 
     ui_element_instance::ptr instantiate(
         HWND parent,
@@ -464,7 +553,7 @@ public:
     }
 
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform seekbar using decoded spectral analysis.";
+        out = "Frequency-colored waveform seekbar with mouse-wheel zoom and drag panning.";
         return true;
     }
 };
