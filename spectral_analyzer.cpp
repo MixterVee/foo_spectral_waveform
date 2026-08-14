@@ -30,7 +30,6 @@ void spectral_analyzer::feed_envelope_sample(float mono) {
     m_envelope_peak = std::max(m_envelope_peak, std::abs(mono));
     m_envelope_sum_squares += static_cast<double>(mono) * static_cast<double>(mono);
     ++m_envelope_count;
-
     if (m_envelope_count >= m_envelope_frames) flush_envelope();
 }
 
@@ -140,7 +139,27 @@ waveform_data spectral_analyzer::finish() {
     out.sample_rate = m_sample_rate;
     out.channels = m_channels;
     out.duration_seconds = m_sample_rate ? static_cast<double>(m_total_frames) / m_sample_rate : 0.0;
-    out.points = std::move(m_points);
+
+    // Expand the drawable timeline to the fine envelope rate, carrying the nearest
+    // FFT color into each point. This gives the UI roughly 5 ms shape resolution
+    // without increasing the number of FFT calculations.
+    if (!m_envelope.empty() && !m_points.empty()) {
+        out.points.reserve(m_envelope.size());
+        const std::size_t spectralCount = m_points.size();
+        const std::size_t envelopeCount = m_envelope.size();
+        for (std::size_t i = 0; i < envelopeCount; ++i) {
+            const std::size_t spectralIndex = std::min(
+                spectralCount - 1,
+                (i * spectralCount) / envelopeCount);
+            waveform_point p = m_points[spectralIndex];
+            p.peak = m_envelope[i].peak;
+            p.rms = m_envelope[i].rms;
+            out.points.push_back(p);
+        }
+    } else {
+        out.points = std::move(m_points);
+    }
+
     out.envelope = std::move(m_envelope);
     return out;
 }
