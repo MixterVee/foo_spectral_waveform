@@ -3,10 +3,10 @@
 #endif
 
 #include <foobar2000/SDK/foobar2000.h>
-#include <foobar2000/helpers/input_helpers.h>
 #include <windows.h>
 #include <windowsx.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -267,7 +267,7 @@ private:
                     LineTo(dc, x, mid + half + 1);
                 }
                 SelectObject(dc, oldPen);
-            } else if (m_analyzing) {
+            } else if (m_analyzing.load()) {
                 draw_status_text(dc, rc, L"Analyzing waveform...");
             }
 
@@ -308,7 +308,7 @@ private:
         if (aborter) aborter->abort();
         if (m_worker.joinable()) m_worker.join();
         m_abort.reset();
-        m_analyzing = false;
+        m_analyzing.store(false);
     }
 
     void clear_waveform() {
@@ -324,16 +324,18 @@ private:
             return;
         }
 
-        m_analyzing = true;
+        m_analyzing.store(true);
         auto aborter = std::make_shared<abort_callback_impl>();
         m_abort = aborter;
         HWND targetWnd = m_wnd;
 
         m_worker = std::thread([this, track, aborter, targetWnd]() {
             try {
-                const t_uint32 decodeFlags = input_flag_no_seeking | input_flag_no_looping;
-                input_helper input;
-                input.open(nullptr, track, decodeFlags, *aborter);
+                const t_uint32 decodeFlags = input_flag_simpledecode;
+                service_ptr_t<input_decoder> decoder;
+                input_entry::g_open_for_decoding(
+                    decoder, nullptr, track->get_path(), *aborter);
+                decoder->initialize(track->get_subsong_index(), decodeFlags, *aborter);
 
                 audio_chunk_impl_temporary chunk;
                 std::unique_ptr<spectral_waveform::spectral_analyzer> analyzer;
@@ -341,7 +343,7 @@ private:
                 unsigned sampleRate = 0;
                 unsigned channels = 0;
 
-                while (input.run(chunk, *aborter)) {
+                while (decoder->run(chunk, *aborter)) {
                     aborter->check();
                     if (chunk.is_empty()) continue;
 
@@ -380,7 +382,7 @@ private:
                 console::print(msg);
             }
 
-            m_analyzing = false;
+            m_analyzing.store(false);
             if (!aborter->is_aborting() && targetWnd != nullptr) {
                 PostMessageW(targetWnd, kMsgAnalysisReady, 0, 0);
             }
@@ -418,7 +420,7 @@ private:
     std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
     std::thread m_worker;
     std::shared_ptr<abort_callback_impl> m_abort;
-    volatile bool m_analyzing = false;
+    std::atomic_bool m_analyzing{false};
 };
 
 class spectral_waveform_element : public ui_element {
