@@ -3,10 +3,18 @@
 #endif
 
 #include <foobar2000/SDK/foobar2000.h>
+#include <foobar2000/helpers/input_helpers.h>
 #include <windows.h>
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include "spectral_analyzer.h"
+#include "spectral_palette.h"
 
 namespace {
 
@@ -14,6 +22,7 @@ static const GUID guid_spectral_waveform_ui =
 { 0x8a3fe0d1, 0x62dc, 0x4bf2, { 0x9a, 0x72, 0x56, 0x37, 0x42, 0x2c, 0xb1, 0x91 } };
 
 static const wchar_t* kWindowClassName = L"foo_spectral_waveform_ui_v02";
+static constexpr UINT kMsgAnalysisReady = WM_APP + 0x351;
 
 class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
 public:
@@ -31,9 +40,15 @@ public:
             0, 0, 0, 0, parent, nullptr, core_api::get_my_instance(), this);
         if (m_wnd == nullptr) throw exception_win32(GetLastError());
         SetTimer(m_wnd, 1, 50, nullptr);
+
+        metadb_handle_ptr nowPlaying;
+        if (playback_control::get()->get_now_playing(nowPlaying)) {
+            start_analysis(nowPlaying);
+        }
     }
 
     ~spectral_waveform_instance() {
+        stop_analysis();
         if (m_wnd != nullptr) {
             KillTimer(m_wnd, 1);
             DestroyWindow(m_wnd);
@@ -121,6 +136,10 @@ private:
         case WM_LBUTTONDBLCLK:
             seek_from_x(GET_X_LPARAM(lp));
             return 0;
+        case kMsgAnalysisReady:
+            m_lastPlayX = -1;
+            InvalidateRect(wnd, nullptr, FALSE);
+            return 0;
         case WM_NCDESTROY:
             SetWindowLongPtrW(wnd, GWLP_USERDATA, 0);
             if (m_wnd == wnd) m_wnd = nullptr;
@@ -170,6 +189,47 @@ private:
         m_lastPlayX = newX;
     }
 
+    std::shared_ptr<const spectral_waveform::waveform_data> waveform_snapshot() const {
+        std::lock_guard<std::mutex> lock(m_waveformMutex);
+        return m_waveform;
+    }
+
+    static spectral_waveform::waveform_point aggregate_point(
+        const spectral_waveform::waveform_data& data, int x, int width) {
+        spectral_waveform::waveform_point out{};
+        const size_t count = data.points.size();
+        if (count == 0 || width <= 0) return out;
+
+        size_t begin = (static_cast<size_t>(x) * count) / static_cast<size_t>(width);
+        size_t end = (static_cast<size_t>(x + 1) * count) / static_cast<size_t>(width);
+        begin = std::min(begin, count - 1);
+        end = std::max(begin + 1, std::min(end, count));
+
+        uint64_t bass = 0, mids = 0, treble = 0;
+        uint16_t peak = 0;
+        for (size_t i = begin; i < end; ++i) {
+            const auto& p = data.points[i];
+            peak = std::max(peak, p.peak);
+            bass += p.bass;
+            mids += p.mids;
+            treble += p.treble;
+        }
+
+        const uint64_t n = static_cast<uint64_t>(end - begin);
+        out.peak = peak;
+        out.bass = static_cast<uint8_t>(bass / n);
+        out.mids = static_cast<uint8_t>(mids / n);
+        out.treble = static_cast<uint8_t>(treble / n);
+        return out;
+    }
+
+    void draw_status_text(HDC dc, const RECT& rc, const wchar_t* text) const {
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, query_color(ui_color_text, COLOR_WINDOWTEXT));
+        RECT textRc = rc;
+        DrawTextW(dc, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
     void paint() {
         PAINTSTRUCT ps{};
         HDC dc = BeginPaint(m_wnd, &ps);
@@ -185,35 +245,30 @@ private:
         FillRect(dc, &ps.rcPaint, bgBrush);
         DeleteObject(bgBrush);
 
+        const auto waveform = waveform_snapshot();
+
         if (width > 0 && height > 0) {
-            const int mid = height / 2;
-            const int usable = std::max(2, height - 8);
-            const int xStart = std::max(0L, ps.rcPaint.left);
-            const int xEnd = std::min(width, static_cast<int>(ps.rcPaint.right));
+            if (waveform && !waveform->points.empty()) {
+                const int mid = height / 2;
+                const int usable = std::max(2, height - 8);
+                const int xStart = std::max(0L, ps.rcPaint.left);
+                const int xEnd = std::min(width, static_cast<int>(ps.rcPaint.right));
 
-            // v0.2 UI scaffold: deterministic multiband-looking bars.
-            // Real decoded spectral points replace these in the next step.
-            for (int x = xStart; x < xEnd; ++x) {
-                const double t = static_cast<double>(x) / std::max(1, width - 1);
-                const double a = 0.26 + 0.34 * std::abs(std::sin(t * 19.0))
-                                     + 0.22 * std::abs(std::sin(t * 53.0 + 0.8));
-                const int half = std::max(1, static_cast<int>(a * usable * 0.5));
+                HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+                for (int x = xStart; x < xEnd; ++x) {
+                    const auto point = aggregate_point(*waveform, x, width);
+                    const double amp = point.peak / 65535.0;
+                    const int half = static_cast<int>(std::lround(amp * usable * 0.5));
+                    if (half <= 0) continue;
 
-                const double low = 0.5 + 0.5 * std::sin(t * 8.0 + 0.4);
-                const double midBand = 0.5 + 0.5 * std::sin(t * 13.0 + 2.1);
-                const double high = 0.5 + 0.5 * std::sin(t * 21.0 + 4.0);
-                const double norm = std::max(0.001, std::max(low, std::max(midBand, high)));
-
-                const int r = static_cast<int>(255.0 * std::min(1.0, (low + 0.25 * midBand) / norm));
-                const int g = static_cast<int>(255.0 * std::min(1.0, (0.85 * midBand + 0.15 * high) / norm));
-                const int b = static_cast<int>(255.0 * std::min(1.0, (high + 0.08 * midBand) / norm));
-
-                HPEN pen = CreatePen(PS_SOLID, 1, RGB(r, g, b));
-                HGDIOBJ old = SelectObject(dc, pen);
-                MoveToEx(dc, x, mid - half, nullptr);
-                LineTo(dc, x, mid + half + 1);
-                SelectObject(dc, old);
-                DeleteObject(pen);
+                    const auto color = spectral_waveform::color_for_point(point);
+                    SetDCPenColor(dc, RGB(color.r, color.g, color.b));
+                    MoveToEx(dc, x, mid - half, nullptr);
+                    LineTo(dc, x, mid + half + 1);
+                }
+                SelectObject(dc, oldPen);
+            } else if (m_analyzing) {
+                draw_status_text(dc, rc, L"Analyzing waveform...");
             }
 
             const int playX = current_playhead_x(width);
@@ -248,8 +303,102 @@ private:
         pc->playback_seek(frac * length);
     }
 
-    void on_playback_new_track(metadb_handle_ptr) override { invalidate_all(); }
-    void on_playback_stop(play_control::t_stop_reason) override { invalidate_all(); }
+    void stop_analysis() {
+        auto aborter = m_abort;
+        if (aborter) aborter->abort();
+        if (m_worker.joinable()) m_worker.join();
+        m_abort.reset();
+        m_analyzing = false;
+    }
+
+    void clear_waveform() {
+        std::lock_guard<std::mutex> lock(m_waveformMutex);
+        m_waveform.reset();
+    }
+
+    void start_analysis(metadb_handle_ptr track) {
+        stop_analysis();
+        clear_waveform();
+        if (track.is_empty()) {
+            invalidate_all();
+            return;
+        }
+
+        m_analyzing = true;
+        auto aborter = std::make_shared<abort_callback_impl>();
+        m_abort = aborter;
+        HWND targetWnd = m_wnd;
+
+        m_worker = std::thread([this, track, aborter, targetWnd]() {
+            try {
+                const t_uint32 decodeFlags = input_flag_no_seeking | input_flag_no_looping;
+                input_helper input;
+                input.open(nullptr, track, decodeFlags, *aborter);
+
+                audio_chunk_impl_temporary chunk;
+                std::unique_ptr<spectral_waveform::spectral_analyzer> analyzer;
+                std::vector<float> pcm;
+                unsigned sampleRate = 0;
+                unsigned channels = 0;
+
+                while (input.run(chunk, *aborter)) {
+                    aborter->check();
+                    if (chunk.is_empty()) continue;
+
+                    if (!analyzer) {
+                        sampleRate = chunk.get_sample_rate();
+                        channels = chunk.get_channels();
+                        if (sampleRate == 0 || channels == 0) continue;
+                        analyzer = std::make_unique<spectral_waveform::spectral_analyzer>(sampleRate, channels);
+                    }
+
+                    if (chunk.get_sample_rate() != sampleRate || chunk.get_channels() != channels) {
+                        throw exception_unexpected_audio_format_change();
+                    }
+
+                    const size_t used = chunk.get_used_size();
+                    pcm.resize(used);
+                    const audio_sample* src = chunk.get_data();
+                    for (size_t i = 0; i < used; ++i) {
+                        pcm[i] = static_cast<float>(src[i]);
+                    }
+                    analyzer->feed(pcm.data(), chunk.get_sample_count());
+                }
+
+                aborter->check();
+                if (analyzer) {
+                    auto result = std::make_shared<spectral_waveform::waveform_data>(analyzer->finish());
+                    {
+                        std::lock_guard<std::mutex> lock(m_waveformMutex);
+                        m_waveform = std::move(result);
+                    }
+                }
+            } catch (exception_aborted const&) {
+            } catch (std::exception const& e) {
+                pfc::string_formatter msg;
+                msg << "foo_spectral_waveform: analysis failed: " << e.what();
+                console::print(msg);
+            }
+
+            m_analyzing = false;
+            if (!aborter->is_aborting() && targetWnd != nullptr) {
+                PostMessageW(targetWnd, kMsgAnalysisReady, 0, 0);
+            }
+        });
+
+        invalidate_all();
+    }
+
+    void on_playback_new_track(metadb_handle_ptr track) override {
+        start_analysis(track);
+    }
+
+    void on_playback_stop(play_control::t_stop_reason) override {
+        stop_analysis();
+        clear_waveform();
+        invalidate_all();
+    }
+
     void on_playback_seek(double) override { invalidate_playhead(); }
     void on_playback_pause(bool) override { invalidate_playhead(); }
     void on_playback_time(double) override { invalidate_playhead(); }
@@ -264,6 +413,12 @@ private:
     HWND m_wnd = nullptr;
     int m_lastPlayX = -1;
     ui_element_instance_callback::ptr m_callback;
+
+    mutable std::mutex m_waveformMutex;
+    std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
+    std::thread m_worker;
+    std::shared_ptr<abort_callback_impl> m_abort;
+    volatile bool m_analyzing = false;
 };
 
 class spectral_waveform_element : public ui_element {
@@ -291,7 +446,7 @@ public:
     }
 
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform seekbar. v0.2 UI scaffold.";
+        out = "Frequency-colored waveform seekbar using decoded spectral analysis.";
         return true;
     }
 };
