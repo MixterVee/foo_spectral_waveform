@@ -1,0 +1,68 @@
+name: Build Native foo_spectral_waveform
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Get foobar2000 SDK
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/reupen/foobar2000-sdk-unmodified.git sdk
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build PFC
+        shell: pwsh
+        run: |
+          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\x64\Release\"
+
+      - name: Build foobar2000 SDK
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\x64\Release\"
+
+      - name: Build component client
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\x64\Release\"
+
+      - name: Build foo_spectral_waveform
+        shell: pwsh
+        run: |
+          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:BuildProjectReferences=false
+
+      - name: Package fb2k-component
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) {
+            throw "Built DLL not found."
+          }
+
+          New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
+          Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
+
+          if (Test-Path "foo_spectral_waveform.zip") {
+            Remove-Item "foo_spectral_waveform.zip" -Force
+          }
+
+          if (Test-Path "foo_spectral_waveform.fb2k-component") {
+            Remove-Item "foo_spectral_waveform.fb2k-component" -Force
+          }
+
+          7z a -tzip foo_spectral_waveform.zip ".\stage\x64\foo_spectral_waveform.dll"
+          Rename-Item foo_spectral_waveform.zip foo_spectral_waveform.fb2k-component
+
+      - name: Upload component
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_spectral_waveform-native-x64
+          path: foo_spectral_waveform.fb2k-component
