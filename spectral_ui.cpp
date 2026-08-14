@@ -133,6 +133,12 @@ private:
         case WM_MOUSEWHEEL:
             zoom_from_wheel(GET_WHEEL_DELTA_WPARAM(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_SPACE && m_viewSpan < 0.9995) {
+                recenter_on_playhead();
+                return 0;
+            }
+            break;
         case WM_LBUTTONDOWN:
             begin_drag(GET_X_LPARAM(lp));
             return 0;
@@ -180,6 +186,20 @@ private:
         m_viewSpan = std::clamp(m_viewSpan, kMinViewSpan, 1.0);
         m_viewStart = std::clamp(m_viewStart, 0.0, 1.0 - m_viewSpan);
         if (m_viewSpan > 0.9995) reset_view();
+    }
+
+    void recenter_on_playhead() {
+        if (m_wnd == nullptr || m_viewSpan >= 0.9995) return;
+
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        if (length <= 0.0) return;
+
+        const double positionFrac = std::clamp(pc->playback_get_position() / length, 0.0, 1.0);
+        m_viewStart = positionFrac - m_viewSpan * 0.5;
+        clamp_view();
+        m_lastPlayX = -1;
+        InvalidateRect(m_wnd, nullptr, FALSE);
     }
 
     int current_playhead_x(int width) const {
@@ -239,6 +259,7 @@ private:
             m_viewSpan = newSpan;
             m_viewStart = anchor - cursorX * m_viewSpan;
             clamp_view();
+            SetFocus(m_wnd);
         }
 
         m_lastPlayX = -1;
@@ -553,7 +574,7 @@ public:
     }
 
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform seekbar with mouse-wheel zoom and drag panning.";
+        out = "Frequency-colored waveform seekbar with mouse-wheel zoom, drag panning and Space-to-center.";
         return true;
     }
 };
