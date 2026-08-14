@@ -12,12 +12,20 @@ struct waveform_point {
     std::uint8_t treble = 0;
 };
 
+// Lightweight high-resolution amplitude data used for the waveform shape.
+// Spectral color remains in waveform_point at the lower FFT analysis rate.
+struct waveform_envelope_point {
+    std::uint16_t peak = 0;
+    std::uint16_t rms = 0;
+};
+
 struct waveform_data {
     double duration_seconds = 0.0;
     std::uint32_t sample_rate = 0;
     std::uint32_t channels = 0;
     std::uint16_t rms_reference = 0;
     std::vector<waveform_point> points;
+    std::vector<waveform_envelope_point> envelope;
 };
 
 } // namespace spectral_waveform
