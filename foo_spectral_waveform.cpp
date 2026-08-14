@@ -4,10 +4,10 @@
 
 DECLARE_COMPONENT_VERSION(
     "Spectral Waveform",
-    "0.1.0-alpha",
+    "0.2.0-alpha",
     "Serato-inspired spectral waveform seekbar for foobar2000.\n"
     "\n"
-    "Initial development build: component skeleton + spectral analysis core."
+    "v0.2 development build: Default UI element, playback cursor and click-to-seek."
 );
 
 VALIDATE_COMPONENT_FILENAME("foo_spectral_waveform.dll");
@@ -17,7 +17,7 @@ namespace {
 class spectral_initquit : public initquit {
 public:
     void on_init() override {
-        console::print("foo_spectral_waveform: v0.1.0-alpha loaded");
+        console::print("foo_spectral_waveform: v0.2.0-alpha loaded");
     }
 
     void on_quit() override {}
