@@ -1,5 +1,10 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <foobar2000/SDK/foobar2000.h>
 #include <windows.h>
+#include <windowsx.h>
 #include <algorithm>
 #include <cmath>
 
