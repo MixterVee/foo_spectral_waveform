@@ -11,7 +11,8 @@ public:
         t_size frames,
         unsigned channels,
         unsigned sample_rate,
-        pfc::array_t<float>& vocals,
-        pfc::array_t<float>& instrumental,
+        float* vocals_out,
+        float* instrumental_out,
+        t_size output_samples,
         abort_callback& aborter) = 0;
 };
