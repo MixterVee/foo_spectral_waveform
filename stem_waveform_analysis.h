@@ -9,14 +9,15 @@ namespace spectral_waveform {
 // Returns -1 when the Stem Separator provider is unavailable.
 int current_stem_mode();
 
-// Replaces the original waveform with the selected stem in sequential blocks.
-// The callback is invoked after each completed block so the UI can show the
-// stem waveform filling ahead without waiting for the whole track.
-bool analyze_stem_progressive(
+// Runs one progressive separation pass and builds both Vocals and Instrumental
+// waveforms from the same Spleeter inference blocks. The callback is invoked
+// after each completed block so either stem can be displayed immediately.
+bool analyze_stems_progressive(
     metadb_handle_ptr track,
-    int mode,
     const waveform_data& original,
     abort_callback& aborter,
-    const std::function<void(const waveform_data&)>& on_update);
+    const std::function<void(const waveform_data&, const waveform_data&)>& on_update,
+    waveform_data& vocals_out,
+    waveform_data& instrumental_out);
 
 } // namespace spectral_waveform
