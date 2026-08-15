@@ -88,6 +88,7 @@
     <ClCompile Include="spectral_ui.cpp" />
     <ClCompile Include="waveform_cache.cpp" />
     <ClCompile Include="live_output_capture.cpp" />
+    <ClCompile Include="stem_waveform_analysis.cpp" />
   </ItemGroup>
 
   <ItemGroup>
@@ -96,6 +97,8 @@
     <ClInclude Include="waveform_data.h" />
     <ClInclude Include="waveform_cache.h" />
     <ClInclude Include="live_output_capture.h" />
+    <ClInclude Include="stem_waveform_provider.h" />
+    <ClInclude Include="stem_waveform_analysis.h" />
   </ItemGroup>
 
   <ItemGroup>
