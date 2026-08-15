@@ -98,7 +98,7 @@ public:
         if (m_thread.joinable()) m_thread.join();
     }
 
-    void request(metadb_handle_ptr track, int mode) {
+    void request(metadb_handle_ptr track, int mode, double prioritySeconds) {
         bool newTrack = false;
         bool queueAnalysis = false;
 
@@ -115,6 +115,7 @@ public:
             }
 
             m_mode = mode;
+            m_prioritySeconds = std::max(0.0, prioritySeconds);
 
             // Mode changes on the same track do not cancel a dual-stem pass.
             // Both stem previews are being generated together, so the UI can
@@ -146,14 +147,10 @@ private:
         return !m_stop && generation == m_generation;
     }
 
-    void set_ready(std::uint64_t generation, bool ready) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (generation == m_generation) m_ready = ready;
-    }
-
     void worker_main() {
         for (;;) {
             metadb_handle_ptr track;
+            double prioritySeconds = 0.0;
             std::uint64_t generation = 0;
             std::shared_ptr<abort_callback_impl> aborter;
 
@@ -163,6 +160,7 @@ private:
                 if (m_stop) return;
 
                 track = m_track;
+                prioritySeconds = m_prioritySeconds;
                 generation = m_generation;
                 m_hasRequest = false;
                 m_analysisActive = true;
@@ -210,6 +208,7 @@ private:
                             const bool analyzed = analyze_stems_progressive(
                                 track,
                                 original,
+                                prioritySeconds,
                                 *aborter,
                                 [this, generation, aborter](
                                     const waveform_data& vocals,
@@ -257,6 +256,7 @@ private:
     std::uint64_t m_generation = 0;
     metadb_handle_ptr m_track;
     int m_mode = -1;
+    double m_prioritySeconds = 0.0;
     std::shared_ptr<abort_callback_impl> m_activeAbort;
 };
 
@@ -268,31 +268,38 @@ public:
         : play_callback_impl_base(
             play_callback::flag_on_playback_new_track |
             play_callback::flag_on_playback_stop |
+            play_callback::flag_on_playback_seek |
             play_callback::flag_on_playback_time) {}
 
     void prime(metadb_handle_ptr track) {
         m_track = track;
         m_lastMode = current_stem_mode();
-        if (g_manager) g_manager->request(m_track, m_lastMode);
+        const double position = std::max(0.0, playback_control::get()->playback_get_position());
+        if (g_manager) g_manager->request(m_track, m_lastMode, position);
     }
 
 private:
     void on_playback_new_track(metadb_handle_ptr track) override {
         m_track = track;
         m_lastMode = current_stem_mode();
-        if (g_manager) g_manager->request(m_track, m_lastMode);
+        if (g_manager) g_manager->request(m_track, m_lastMode, 0.0);
     }
 
     void on_playback_stop(play_control::t_stop_reason) override {
         if (g_manager) g_manager->cancel_keep_preview();
     }
 
-    void on_playback_time(double) override {
+    void on_playback_seek(double time) override {
+        m_lastMode = current_stem_mode();
+        if (g_manager) g_manager->request(m_track, m_lastMode, time);
+    }
+
+    void on_playback_time(double time) override {
         const int mode = current_stem_mode();
         if (mode == m_lastMode) return;
 
         m_lastMode = mode;
-        if (g_manager) g_manager->request(m_track, mode);
+        if (g_manager) g_manager->request(m_track, mode, time);
     }
 
     metadb_handle_ptr m_track;
