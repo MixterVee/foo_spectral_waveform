@@ -32,7 +32,7 @@ void invalidate_waveform_windows() {
     EnumChildWindows(root,
         [](HWND wnd, LPARAM) -> BOOL {
             wchar_t className[128]{};
-            if (GetClassNameW(wnd, className, static_cast<int>(std::size(className))) > 0 &&
+            if (GetClassNameW(wnd, className, _countof(className)) > 0 &&
                 wcscmp(className, kWaveformWindowClass) == 0) {
                 // The waveform's WM_SIZE handler discards its cached bitmap and
                 // schedules a full repaint. The actual size is unchanged.
@@ -132,11 +132,22 @@ private:
             if (mode > 0 && mode <= 2 && track.is_valid()) {
                 try {
                     waveform_data original;
-                    if (!load_waveform_cache(track, original, *aborter)) {
-                        // The UI analysis normally creates this cache first. If
-                        // it is not ready yet, wait for the next mode/time poll
-                        // rather than duplicating the source analysis here.
-                    } else {
+                    bool haveOriginal = false;
+
+                    // A new-track callback can arrive just before the regular
+                    // waveform worker has finished writing its disk cache. Wait
+                    // briefly in this background thread and retry instead of
+                    // missing stem preview generation for the whole track.
+                    for (unsigned attempt = 0; attempt < 40 && !aborter->is_aborting(); ++attempt) {
+                        if (!is_current(generation)) break;
+                        if (load_waveform_cache(track, original, *aborter)) {
+                            haveOriginal = true;
+                            break;
+                        }
+                        aborter->sleep(0.25);
+                    }
+
+                    if (haveOriginal && is_current(generation)) {
                         analyze_stem_progressive(
                             track,
                             mode,
