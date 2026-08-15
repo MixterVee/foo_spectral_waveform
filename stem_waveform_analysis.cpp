@@ -23,7 +23,7 @@ FOOGUIDDECL const GUID stem_waveform_provider::class_guid =
 namespace spectral_waveform {
 namespace {
 
-constexpr double kStemBlockSeconds = 10.0;
+constexpr double kStemBlockSeconds = 5.0;
 
 stem_waveform_provider::ptr find_provider() {
     stem_waveform_provider::ptr provider;
