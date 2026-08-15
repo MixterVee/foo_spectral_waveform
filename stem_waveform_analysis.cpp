@@ -80,7 +80,10 @@ bool analyze_stem_progressive(
     if (track.is_empty() || mode <= 0 || mode > 2 || original.points.empty()) return false;
 
     auto provider = find_provider();
-    if (provider.is_empty()) return false;
+    if (provider.is_empty()) {
+        console::print("foo_spectral_waveform: Stem Waveform Provider was not found.");
+        return false;
+    }
 
     const t_uint32 decodeFlags = input_flag_simpledecode;
     service_ptr_t<input_decoder> decoder;
@@ -102,24 +105,28 @@ bool analyze_stem_progressive(
         const size_t samples = frames * channels;
         if (pending.size() < samples) return true;
 
-        pfc::array_t<float> vocals;
-        pfc::array_t<float> instrumental;
+        std::vector<float> vocals(samples);
+        std::vector<float> instrumental(samples);
         if (!provider->process_both(
                 pending.data(),
                 static_cast<t_size>(frames),
                 channels,
                 sampleRate,
-                vocals,
-                instrumental,
+                vocals.data(),
+                instrumental.data(),
+                static_cast<t_size>(samples),
                 aborter)) {
+            pfc::string_formatter msg;
+            msg << "foo_spectral_waveform: stem provider failed for "
+                << sampleRate << " Hz / " << channels << " channels.";
+            console::print(msg);
             return false;
         }
 
-        const pfc::array_t<float>& selected = mode == 1 ? vocals : instrumental;
-        if (selected.get_size() != samples) return false;
+        const std::vector<float>& selected = mode == 1 ? vocals : instrumental;
 
         spectral_analyzer analyzer(sampleRate, channels);
-        analyzer.feed(selected.get_ptr(), frames);
+        analyzer.feed(selected.data(), frames);
         waveform_data block = analyzer.finish();
 
         const double startSeconds = static_cast<double>(processedFrames) / sampleRate;
