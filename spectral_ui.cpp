@@ -490,10 +490,10 @@ private:
         const int padX = 6;
         const int padY = 3;
         RECT box{
-            std::max(4, width - textSize.cx - padX * 2 - 6),
-            6,
-            width - 6,
-            std::min(height - 4, 6 + textSize.cy + padY * 2)
+            std::max<LONG>(4L, static_cast<LONG>(width) - textSize.cx - static_cast<LONG>(padX * 2 + 6)),
+            6L,
+            static_cast<LONG>(width - 6),
+            std::min<LONG>(static_cast<LONG>(height - 4), 6L + textSize.cy + static_cast<LONG>(padY * 2))
         };
         if (box.right <= box.left || box.bottom <= box.top) return;
 
