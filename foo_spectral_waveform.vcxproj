@@ -87,6 +87,7 @@
     <ClCompile Include="spectral_palette.cpp" />
     <ClCompile Include="spectral_ui.cpp" />
     <ClCompile Include="waveform_cache.cpp" />
+    <ClCompile Include="live_output_capture.cpp" />
   </ItemGroup>
 
   <ItemGroup>
@@ -94,6 +95,7 @@
     <ClInclude Include="spectral_palette.h" />
     <ClInclude Include="waveform_data.h" />
     <ClInclude Include="waveform_cache.h" />
+    <ClInclude Include="live_output_capture.h" />
   </ItemGroup>
 
   <ItemGroup>
