@@ -10,4 +10,18 @@ namespace spectral_waveform {
 bool load_waveform_cache(metadb_handle_ptr track, waveform_data& out, abort_callback& aborter);
 void save_waveform_cache(metadb_handle_ptr track, const waveform_data& data, abort_callback& aborter);
 
+// Separate persistent caches for the two Spleeter waveform results.
+// mode: 1 = Vocals, 2 = Instrumental.
+bool load_stem_waveform_cache(
+    metadb_handle_ptr track,
+    int mode,
+    waveform_data& out,
+    abort_callback& aborter);
+
+void save_stem_waveform_cache(
+    metadb_handle_ptr track,
+    int mode,
+    const waveform_data& data,
+    abort_callback& aborter);
+
 } // namespace spectral_waveform
