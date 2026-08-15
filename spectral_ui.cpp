@@ -470,6 +470,47 @@ private:
         DrawTextW(dc, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
+    void draw_view_overlay(HDC dc, int width, int height) const {
+        if (dc == nullptr || width < 80 || height < 24) return;
+
+        const double zoom = 1.0 / std::max(m_viewSpan, 1.0e-9);
+        const int tenths = std::max(10, static_cast<int>(std::lround(zoom * 10.0)));
+        wchar_t label[64]{};
+        if ((tenths % 10) == 0) {
+            if (m_followPlayhead) wsprintfW(label, L"%dx  Follow", tenths / 10);
+            else wsprintfW(label, L"%dx", tenths / 10);
+        } else {
+            if (m_followPlayhead) wsprintfW(label, L"%d.%dx  Follow", tenths / 10, tenths % 10);
+            else wsprintfW(label, L"%d.%dx", tenths / 10, tenths % 10);
+        }
+
+        SIZE textSize{};
+        if (!GetTextExtentPoint32W(dc, label, lstrlenW(label), &textSize)) return;
+
+        const int padX = 6;
+        const int padY = 3;
+        RECT box{
+            std::max(4, width - textSize.cx - padX * 2 - 6),
+            6,
+            width - 6,
+            std::min(height - 4, 6 + textSize.cy + padY * 2)
+        };
+        if (box.right <= box.left || box.bottom <= box.top) return;
+
+        HBRUSH background = CreateSolidBrush(query_color(ui_color_background, COLOR_WINDOW));
+        FillRect(dc, &box, background);
+        DeleteObject(background);
+
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, query_color(ui_color_text, COLOR_WINDOWTEXT));
+        RECT textRc = box;
+        textRc.left += padX;
+        textRc.right -= padX;
+        textRc.top += padY;
+        textRc.bottom -= padY;
+        DrawTextW(dc, label, -1, &textRc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
     void release_back_buffer() {
         if (m_waveDC != nullptr) {
             if (m_waveOldBitmap != nullptr) SelectObject(m_waveDC, m_waveOldBitmap);
@@ -614,6 +655,7 @@ private:
                 DeleteObject(pen);
                 m_lastPlayX = playX;
             }
+            draw_view_overlay(dc, width, height);
         }
 
         EndPaint(m_wnd, &ps);
@@ -782,7 +824,7 @@ public:
     }
     ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, Space-to-follow and cached centered scrolling.";
+        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, Space-to-follow and cached centered scrolling.";
         return true;
     }
 };
