@@ -32,6 +32,13 @@ enum : UINT {
     kMenuFitTrack,
     kMenuCenterPlayhead,
     kMenuFollowPlayhead,
+    kMenuFollowCentered,
+    kMenuFollowPaged,
+};
+
+enum class follow_mode {
+    centered,
+    paged,
 };
 
 class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
@@ -230,21 +237,27 @@ private:
         if (!playback_fraction(positionFrac)) return false;
 
         constexpr double epsilon = 1.0e-9;
-        const double pageEnd = view_end();
-        if (positionFrac >= m_viewStart - epsilon && positionFrac <= pageEnd + epsilon) return false;
-
         const double oldStart = m_viewStart;
-        if (positionFrac > pageEnd) {
-            do {
-                m_viewStart += m_viewSpan;
-            } while (positionFrac > m_viewStart + m_viewSpan + epsilon &&
-                m_viewStart < 1.0 - m_viewSpan);
+
+        if (m_followMode == follow_mode::centered) {
+            m_viewStart = positionFrac - m_viewSpan * 0.5;
+            clamp_view();
         } else {
-            const double pageIndex = std::floor(positionFrac / m_viewSpan);
-            m_viewStart = pageIndex * m_viewSpan;
+            const double pageEnd = view_end();
+            if (positionFrac >= m_viewStart - epsilon && positionFrac <= pageEnd + epsilon) return false;
+
+            if (positionFrac > pageEnd) {
+                do {
+                    m_viewStart += m_viewSpan;
+                } while (positionFrac > m_viewStart + m_viewSpan + epsilon &&
+                    m_viewStart < 1.0 - m_viewSpan);
+            } else {
+                const double pageIndex = std::floor(positionFrac / m_viewSpan);
+                m_viewStart = pageIndex * m_viewSpan;
+            }
+            clamp_view();
         }
 
-        clamp_view();
         if (std::abs(m_viewStart - oldStart) < epsilon) return false;
         invalidate_frame();
         return true;
@@ -363,6 +376,11 @@ private:
         AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuCenterPlayhead, L"Center on Playhead\tSpace");
         AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0) |
             (m_followPlayhead ? MF_CHECKED : 0), kMenuFollowPlayhead, L"Follow Playhead");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (m_followMode == follow_mode::centered ? MF_CHECKED : 0),
+            kMenuFollowCentered, L"Follow Mode: Centered Scroll");
+        AppendMenuW(menu, MF_STRING | (m_followMode == follow_mode::paged ? MF_CHECKED : 0),
+            kMenuFollowPaged, L"Follow Mode: Page at Edge");
 
         const UINT command = TrackPopupMenu(menu,
             TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
@@ -387,6 +405,15 @@ private:
             m_followPlayhead = !m_followPlayhead;
             if (m_followPlayhead) center_on_playhead_once();
             else invalidate_frame();
+            break;
+        case kMenuFollowCentered:
+            m_followMode = follow_mode::centered;
+            if (m_followPlayhead) center_on_playhead_once();
+            else invalidate_frame();
+            break;
+        case kMenuFollowPaged:
+            m_followMode = follow_mode::paged;
+            if (m_followPlayhead) invalidate_frame();
             break;
         }
     }
@@ -802,6 +829,7 @@ private:
     double m_viewStart = 0.0;
     double m_viewSpan = 1.0;
     bool m_followPlayhead = false;
+    follow_mode m_followMode = follow_mode::centered;
     bool m_dragging = false;
     bool m_dragMoved = false;
     int m_dragStartX = 0;
@@ -837,7 +865,7 @@ public:
     }
     ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, Space-to-follow and paged waveform following.";
+        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, centered or paged follow modes and cached scrolling.";
         return true;
     }
 };
