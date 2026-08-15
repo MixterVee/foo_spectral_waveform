@@ -70,14 +70,15 @@ int current_stem_mode() {
     }
 }
 
-bool analyze_stem_progressive(
+bool analyze_stems_progressive(
     metadb_handle_ptr track,
-    int mode,
     const waveform_data& original,
     abort_callback& aborter,
-    const std::function<void(const waveform_data&)>& on_update) {
+    const std::function<void(const waveform_data&, const waveform_data&)>& on_update,
+    waveform_data& vocals_out,
+    waveform_data& instrumental_out) {
 
-    if (track.is_empty() || mode <= 0 || mode > 2 || original.points.empty()) return false;
+    if (track.is_empty() || original.points.empty()) return false;
 
     auto provider = find_provider();
     if (provider.is_empty()) {
@@ -92,7 +93,13 @@ bool analyze_stem_progressive(
 
     audio_chunk_impl_temporary chunk;
     std::vector<float> pending;
-    waveform_data working = original;
+    waveform_data workingVocals = original;
+    waveform_data workingInstrumental = original;
+
+    // Stem caches contain stem-derived spectral points only. Keeping the source
+    // envelope would make a future envelope renderer incorrectly show Original.
+    workingVocals.envelope.clear();
+    workingInstrumental.envelope.clear();
 
     unsigned sampleRate = 0;
     unsigned channels = 0;
@@ -123,20 +130,23 @@ bool analyze_stem_progressive(
             return false;
         }
 
-        const std::vector<float>& selected = mode == 1 ? vocals : instrumental;
+        spectral_analyzer vocalsAnalyzer(sampleRate, channels);
+        vocalsAnalyzer.feed(vocals.data(), frames);
+        waveform_data vocalsBlock = vocalsAnalyzer.finish();
 
-        spectral_analyzer analyzer(sampleRate, channels);
-        analyzer.feed(selected.data(), frames);
-        waveform_data block = analyzer.finish();
+        spectral_analyzer instrumentalAnalyzer(sampleRate, channels);
+        instrumentalAnalyzer.feed(instrumental.data(), frames);
+        waveform_data instrumentalBlock = instrumentalAnalyzer.finish();
 
         const double startSeconds = static_cast<double>(processedFrames) / sampleRate;
         const double endSeconds = startSeconds + static_cast<double>(frames) / sampleRate;
-        merge_block(working, block, startSeconds, endSeconds);
+        merge_block(workingVocals, vocalsBlock, startSeconds, endSeconds);
+        merge_block(workingInstrumental, instrumentalBlock, startSeconds, endSeconds);
         processedFrames += frames;
 
         pending.erase(pending.begin(), pending.begin() + static_cast<std::ptrdiff_t>(samples));
 
-        if (on_update) on_update(working);
+        if (on_update) on_update(workingVocals, workingInstrumental);
         return true;
     };
 
@@ -170,6 +180,8 @@ bool analyze_stem_progressive(
         if (!flush_block(remainFrames)) return false;
     }
 
+    vocals_out = std::move(workingVocals);
+    instrumental_out = std::move(workingInstrumental);
     return true;
 }
 
