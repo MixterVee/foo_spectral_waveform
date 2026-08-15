@@ -26,6 +26,14 @@ static constexpr UINT kMsgAnalysisReady = WM_APP + 0x351;
 static constexpr double kMinViewSpan = 0.02;
 static constexpr double kKeyboardPanFraction = 0.10;
 
+enum : UINT {
+    kMenuZoomIn = 1,
+    kMenuZoomOut,
+    kMenuFitTrack,
+    kMenuCenterPlayhead,
+    kMenuFollowPlayhead,
+};
+
 class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
 public:
     spectral_waveform_instance(HWND parent, ui_element_config::ptr, ui_element_instance_callback::ptr callback)
@@ -119,6 +127,9 @@ private:
         case WM_MOUSEWHEEL:
             zoom_from_wheel(GET_WHEEL_DELTA_WPARAM(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
+        case WM_CONTEXTMENU:
+            show_context_menu(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            return 0;
         case WM_GETDLGCODE:
             return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_KEYDOWN:
@@ -199,13 +210,17 @@ private:
         return true;
     }
 
-    void recenter_on_playhead() {
+    void center_on_playhead_once() {
         if (m_wnd == nullptr || m_viewSpan >= 0.9995) return;
         double positionFrac = 0.0;
         if (!playback_fraction(positionFrac)) return;
         m_viewStart = positionFrac - m_viewSpan * 0.5;
         clamp_view();
         invalidate_frame();
+    }
+
+    void recenter_on_playhead() {
+        center_on_playhead_once();
     }
 
     bool update_follow_view() {
@@ -310,6 +325,57 @@ private:
         m_viewStart += static_cast<double>(direction) * m_viewSpan * kKeyboardPanFraction;
         clamp_view();
         invalidate_frame();
+    }
+
+    void show_context_menu(int screenX, int screenY) {
+        if (m_wnd == nullptr) return;
+        SetFocus(m_wnd);
+
+        POINT pt{screenX, screenY};
+        if (screenX == -1 && screenY == -1) {
+            RECT rc{};
+            GetClientRect(m_wnd, &rc);
+            pt.x = (rc.left + rc.right) / 2;
+            pt.y = (rc.top + rc.bottom) / 2;
+            ClientToScreen(m_wnd, &pt);
+        }
+
+        HMENU menu = CreatePopupMenu();
+        if (menu == nullptr) return;
+
+        AppendMenuW(menu, MF_STRING | (m_viewSpan <= kMinViewSpan + 1.0e-9 ? MF_GRAYED : 0), kMenuZoomIn, L"Zoom In\tUp Arrow");
+        AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuZoomOut, L"Zoom Out\tDown Arrow");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuFitTrack, L"Fit Entire Track");
+        AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuCenterPlayhead, L"Center on Playhead\tSpace");
+        AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0) |
+            (m_followPlayhead ? MF_CHECKED : 0), kMenuFollowPlayhead, L"Follow Playhead");
+
+        const UINT command = TrackPopupMenu(menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+            pt.x, pt.y, 0, m_wnd, nullptr);
+        DestroyMenu(menu);
+
+        switch (command) {
+        case kMenuZoomIn:
+            zoom_from_keyboard(true);
+            break;
+        case kMenuZoomOut:
+            zoom_from_keyboard(false);
+            break;
+        case kMenuFitTrack:
+            reset_view();
+            invalidate_all();
+            break;
+        case kMenuCenterPlayhead:
+            center_on_playhead_once();
+            break;
+        case kMenuFollowPlayhead:
+            m_followPlayhead = !m_followPlayhead;
+            if (m_followPlayhead) center_on_playhead_once();
+            else invalidate_frame();
+            break;
+        }
     }
 
     void begin_drag(int x) {
@@ -716,7 +782,7 @@ public:
     }
     ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform with mouse-wheel/arrow-key zoom, drag/arrow panning, Space-to-follow and cached centered scrolling.";
+        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, Space-to-follow and cached centered scrolling.";
         return true;
     }
 };
