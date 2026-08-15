@@ -1,3 +1,7 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <foobar2000/SDK/foobar2000.h>
 
 #include "live_output_capture.h"
