@@ -55,11 +55,22 @@ std::uint64_t track_hash(metadb_handle_ptr track) {
     return hash;
 }
 
-pfc::string8 cache_path_for_track(metadb_handle_ptr track) {
-    char name[96]{};
+pfc::string8 cache_path_for_track(metadb_handle_ptr track, int mode) {
+    char name[112]{};
     const auto hash = track_hash(track);
-    std::snprintf(name, sizeof(name), "foo_spectral_waveform-cache-%016llx.bin",
-        static_cast<unsigned long long>(hash));
+
+    if (mode == 1) {
+        std::snprintf(name, sizeof(name), "foo_spectral_waveform-cache-vocals-%016llx.bin",
+            static_cast<unsigned long long>(hash));
+    } else if (mode == 2) {
+        std::snprintf(name, sizeof(name), "foo_spectral_waveform-cache-instrumental-%016llx.bin",
+            static_cast<unsigned long long>(hash));
+    } else {
+        // Preserve the original cache filename so existing source-waveform caches remain valid.
+        std::snprintf(name, sizeof(name), "foo_spectral_waveform-cache-%016llx.bin",
+            static_cast<unsigned long long>(hash));
+    }
+
     return core_api::pathInProfile(name);
 }
 
@@ -98,13 +109,16 @@ bool valid_header(const cache_header& h) {
     return true;
 }
 
-} // namespace
+bool load_cache_variant(
+    metadb_handle_ptr track,
+    int mode,
+    waveform_data& out,
+    abort_callback& aborter) {
 
-bool load_waveform_cache(metadb_handle_ptr track, waveform_data& out, abort_callback& aborter) {
     if (track.is_empty()) return false;
 
     try {
-        const auto path = cache_path_for_track(track);
+        const auto path = cache_path_for_track(track, mode);
         if (!filesystem::g_exists(path, aborter)) return false;
 
         service_ptr_t<file> f;
@@ -141,7 +155,12 @@ bool load_waveform_cache(metadb_handle_ptr track, waveform_data& out, abort_call
     }
 }
 
-void save_waveform_cache(metadb_handle_ptr track, const waveform_data& data, abort_callback& aborter) {
+void save_cache_variant(
+    metadb_handle_ptr track,
+    int mode,
+    const waveform_data& data,
+    abort_callback& aborter) {
+
     if (track.is_empty() || data.points.empty()) return;
 
     try {
@@ -160,7 +179,7 @@ void save_waveform_cache(metadb_handle_ptr track, const waveform_data& data, abo
         header.point_count = static_cast<std::uint64_t>(data.points.size());
         header.envelope_count = static_cast<std::uint64_t>(data.envelope.size());
 
-        const auto path = cache_path_for_track(track);
+        const auto path = cache_path_for_track(track, mode);
         service_ptr_t<file> f;
         filesystem::g_open_write_new(f, path, aborter);
         f->write_object(&header, sizeof(header), aborter);
@@ -174,6 +193,36 @@ void save_waveform_cache(metadb_handle_ptr track, const waveform_data& data, abo
         // Cache writes are opportunistic; playback/waveform display must not fail
         // just because the profile folder is temporarily unwritable.
     }
+}
+
+} // namespace
+
+bool load_waveform_cache(metadb_handle_ptr track, waveform_data& out, abort_callback& aborter) {
+    return load_cache_variant(track, 0, out, aborter);
+}
+
+void save_waveform_cache(metadb_handle_ptr track, const waveform_data& data, abort_callback& aborter) {
+    save_cache_variant(track, 0, data, aborter);
+}
+
+bool load_stem_waveform_cache(
+    metadb_handle_ptr track,
+    int mode,
+    waveform_data& out,
+    abort_callback& aborter) {
+
+    if (mode != 1 && mode != 2) return false;
+    return load_cache_variant(track, mode, out, aborter);
+}
+
+void save_stem_waveform_cache(
+    metadb_handle_ptr track,
+    int mode,
+    const waveform_data& data,
+    abort_callback& aborter) {
+
+    if (mode != 1 && mode != 2) return;
+    save_cache_variant(track, mode, data, aborter);
 }
 
 } // namespace spectral_waveform
