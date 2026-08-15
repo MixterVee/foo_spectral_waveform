@@ -15,6 +15,7 @@
 
 #include "spectral_analyzer.h"
 #include "spectral_palette.h"
+#include "waveform_cache.h"
 
 namespace {
 
@@ -749,6 +750,19 @@ private:
 
         m_worker = std::thread([this, track, aborter, targetWnd]() {
             try {
+                spectral_waveform::waveform_data cached;
+                if (spectral_waveform::load_waveform_cache(track, cached, *aborter)) {
+                    auto result = std::make_shared<spectral_waveform::waveform_data>(std::move(cached));
+                    {
+                        std::lock_guard<std::mutex> lock(m_waveformMutex);
+                        m_waveform = std::move(result);
+                    }
+                    m_analyzing.store(false);
+                    if (!aborter->is_aborting() && targetWnd != nullptr)
+                        PostMessageW(targetWnd, kMsgAnalysisReady, 0, 0);
+                    return;
+                }
+
                 const t_uint32 decodeFlags = input_flag_simpledecode;
                 service_ptr_t<input_decoder> decoder;
                 input_entry::g_open_for_decoding(decoder, nullptr, track->get_path(), *aborter);
@@ -780,7 +794,9 @@ private:
 
                 aborter->check();
                 if (analyzer) {
-                    auto result = std::make_shared<spectral_waveform::waveform_data>(analyzer->finish());
+                    auto data = analyzer->finish();
+                    spectral_waveform::save_waveform_cache(track, data, *aborter);
+                    auto result = std::make_shared<spectral_waveform::waveform_data>(std::move(data));
                     std::lock_guard<std::mutex> lock(m_waveformMutex);
                     m_waveform = std::move(result);
                 }
@@ -865,7 +881,7 @@ public:
     }
     ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, centered or paged follow modes and cached scrolling.";
+        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, centered or paged follow modes, cached scrolling and persistent waveform analysis cache.";
         return true;
     }
 };
