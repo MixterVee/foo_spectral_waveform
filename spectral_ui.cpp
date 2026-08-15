@@ -16,6 +16,7 @@
 #include "spectral_analyzer.h"
 #include "spectral_palette.h"
 #include "waveform_cache.h"
+#include "live_output_capture.h"
 
 namespace {
 
@@ -26,6 +27,8 @@ static const wchar_t* kWindowClassName = L"foo_spectral_waveform_ui_v03";
 static constexpr UINT kMsgAnalysisReady = WM_APP + 0x351;
 static constexpr double kMinViewSpan = 0.02;
 static constexpr double kKeyboardPanFraction = 0.10;
+static constexpr int kLiveRefreshBehind = 160;
+static constexpr int kLiveRefreshAhead = 40;
 
 enum : UINT {
     kMenuZoomIn = 1,
@@ -280,14 +283,25 @@ private:
         RECT rc{};
         GetClientRect(m_wnd, &rc);
         const int newX = current_playhead_x(rc.right - rc.left);
-        if (newX == m_lastPlayX) return;
+
         auto invalidate_strip = [this, &rc](int x) {
             if (x < 0) return;
             RECT strip{x - 3, rc.top, x + 4, rc.bottom};
             InvalidateRect(m_wnd, &strip, FALSE);
         };
+        auto invalidate_live_band = [this, &rc](int x) {
+            if (x < 0) return;
+            RECT band{x - kLiveRefreshBehind, rc.top, x + kLiveRefreshAhead, rc.bottom};
+            InvalidateRect(m_wnd, &band, FALSE);
+        };
+
+        if (newX == m_lastPlayX) {
+            invalidate_live_band(newX);
+            return;
+        }
+
         invalidate_strip(m_lastPlayX);
-        invalidate_strip(newX);
+        invalidate_live_band(newX);
         m_lastPlayX = newX;
     }
 
@@ -469,6 +483,15 @@ private:
 
         const double leftFrac = m_viewStart + (static_cast<double>(x) / width) * m_viewSpan;
         const double rightFrac = m_viewStart + (static_cast<double>(x + 1) / width) * m_viewSpan;
+
+        if (data.duration_seconds > 0.0) {
+            const double startSeconds = leftFrac * data.duration_seconds;
+            const double endSeconds = rightFrac * data.duration_seconds;
+            if (spectral_waveform::live_output_capture::aggregate(startSeconds, endSeconds, out)) {
+                return out;
+            }
+        }
+
         size_t begin = static_cast<size_t>(std::floor(leftFrac * count));
         size_t end = static_cast<size_t>(std::ceil(rightFrac * count));
         begin = std::min(begin, count - 1);
@@ -663,6 +686,14 @@ private:
             if (waveform && !waveform->points.empty()) {
                 if (!scroll_waveform_buffer(*waveform, width, height)) {
                     rebuild_waveform_buffer(*waveform, width, height);
+                }
+
+                const int liveX = current_playhead_x(width);
+                if (liveX >= 0) {
+                    render_columns(m_waveDC, *waveform,
+                        std::max(0, liveX - kLiveRefreshBehind),
+                        std::min(width, liveX + kLiveRefreshAhead),
+                        width, height);
                 }
             } else {
                 clear_columns(m_waveDC, 0, width, height);
@@ -881,7 +912,7 @@ public:
     }
     ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, centered or paged follow modes, cached scrolling and persistent waveform analysis cache.";
+        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, centered or paged follow modes, persistent analysis cache and live post-DSP stem-aware waveform updates.";
         return true;
     }
 };
