@@ -100,6 +100,45 @@ bool point_at(double seconds, waveform_point& out) {
     return true;
 }
 
+bool aggregate(double start_seconds, double end_seconds, waveform_point& out) {
+    if (end_seconds <= start_seconds) end_seconds = start_seconds + kBinSeconds;
+
+    const std::uint64_t first = bin_for_time(start_seconds);
+    const std::uint64_t last = bin_for_time(std::max(start_seconds, end_seconds - 1.0e-9));
+
+    std::uint64_t rms = 0;
+    std::uint64_t bass = 0;
+    std::uint64_t mids = 0;
+    std::uint64_t treble = 0;
+    std::uint64_t count = 0;
+    std::uint16_t peak = 0;
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (std::uint64_t bin = first; bin <= last; ++bin) {
+        const auto it = g_points.find(bin);
+        if (it == g_points.end()) continue;
+
+        const waveform_point& p = it->second;
+        peak = std::max(peak, p.peak);
+        rms += p.rms;
+        bass += p.bass;
+        mids += p.mids;
+        treble += p.treble;
+        ++count;
+
+        if (bin == UINT64_MAX) break;
+    }
+
+    if (count == 0) return false;
+
+    out.peak = peak;
+    out.rms = static_cast<std::uint16_t>(rms / count);
+    out.bass = static_cast<std::uint8_t>(bass / count);
+    out.mids = static_cast<std::uint8_t>(mids / count);
+    out.treble = static_cast<std::uint8_t>(treble / count);
+    return true;
+}
+
 void reset() {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_points.clear();
