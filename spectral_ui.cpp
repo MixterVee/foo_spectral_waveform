@@ -229,10 +229,23 @@ private:
         double positionFrac = 0.0;
         if (!playback_fraction(positionFrac)) return false;
 
+        constexpr double epsilon = 1.0e-9;
+        const double pageEnd = view_end();
+        if (positionFrac >= m_viewStart - epsilon && positionFrac <= pageEnd + epsilon) return false;
+
         const double oldStart = m_viewStart;
-        m_viewStart = positionFrac - m_viewSpan * 0.5;
+        if (positionFrac > pageEnd) {
+            do {
+                m_viewStart += m_viewSpan;
+            } while (positionFrac > m_viewStart + m_viewSpan + epsilon &&
+                m_viewStart < 1.0 - m_viewSpan);
+        } else {
+            const double pageIndex = std::floor(positionFrac / m_viewSpan);
+            m_viewStart = pageIndex * m_viewSpan;
+        }
+
         clamp_view();
-        if (std::abs(m_viewStart - oldStart) < 1.0e-9) return false;
+        if (std::abs(m_viewStart - oldStart) < epsilon) return false;
         invalidate_frame();
         return true;
     }
@@ -824,7 +837,7 @@ public:
     }
     ui_element_children_enumerator::ptr enumerate_children(ui_element_config::ptr) override { return nullptr; }
     bool get_description(pfc::string_base& out) override {
-        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, Space-to-follow and cached centered scrolling.";
+        out = "Frequency-colored waveform with mouse/keyboard zoom and pan, context controls, zoom/follow status, Space-to-follow and paged waveform following.";
         return true;
     }
 };
