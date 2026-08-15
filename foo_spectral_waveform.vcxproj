@@ -86,12 +86,14 @@
     <ClCompile Include="spectral_analyzer.cpp" />
     <ClCompile Include="spectral_palette.cpp" />
     <ClCompile Include="spectral_ui.cpp" />
+    <ClCompile Include="waveform_cache.cpp" />
   </ItemGroup>
 
   <ItemGroup>
     <ClInclude Include="spectral_analyzer.h" />
     <ClInclude Include="spectral_palette.h" />
     <ClInclude Include="waveform_data.h" />
+    <ClInclude Include="waveform_cache.h" />
   </ItemGroup>
 
   <ItemGroup>
