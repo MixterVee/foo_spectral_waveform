@@ -112,6 +112,10 @@ public:
                 m_track = track;
                 m_ready = false;
                 m_hasRequest = false;
+                // The worker being aborted belongs to the old generation. Mark
+                // the new generation idle so its request can be queued now; the
+                // single worker thread will pick it up after the old one exits.
+                m_analysisActive = false;
             }
 
             m_mode = mode;
