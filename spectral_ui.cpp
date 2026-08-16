@@ -51,13 +51,9 @@ static constexpr ULONGLONG kScrubSeekIntervalMs = 250;
 static constexpr ULONGLONG kScrubMotionTailMs = 40;
 static constexpr ULONGLONG kGrabClickThresholdMs = 350;
 static constexpr ULONGLONG kReleaseGlideDurationMs = 260;
-// Reverse audio position arrives in DSP-sized steps. Interpolate the display at
-// the UI timer rate, but never run far ahead of confirmed transport progress.
-// Keep enough extrapolation headroom to bridge coarse DSP callbacks without
-// freezing the reverse waveform between blocks. Visual catch-up is speed-limited
-// below, so a late authoritative update cannot create a visible jump.
-static constexpr double kReverseVisualLeadSeconds = 0.300;
-static constexpr double kReverseVisualMaxSpeed = 1.75;
+// Reverse display runs from the UI wall clock at exactly 1x. The DSP transport
+// remains responsible for audio, while release seeks to the visible platter
+// position so coarse audio callbacks can never make the waveform jump.
 static constexpr UINT kMenuStemBase = 1000;
 
 enum stem_menu_command : unsigned {
@@ -540,62 +536,31 @@ private:
             return;
         }
 
-        double confirmed = 0.0;
         try {
             if (transport->get_state() != stem_transport_reverse) {
                 m_reverseVisualActive = false;
                 return;
             }
-            confirmed = std::clamp(
-                transport->get_position_seconds() / length, 0.0, 1.0);
         } catch (...) {
             m_reverseVisualActive = false;
             return;
         }
 
         const ULONGLONG now = GetTickCount64();
-        if (m_reverseVisualLastTick == 0) m_reverseVisualLastTick = now;
-        if (m_reverseVisualConfirmedTick == 0) m_reverseVisualConfirmedTick = now;
+        if (m_reverseVisualLastTick == 0) {
+            m_reverseVisualLastTick = now;
+            return;
+        }
 
-        // Cap a delayed UI timer so a busy frame cannot create a large visual jump.
+        // Pure timer-rate 1x reverse. Do not chase DSP block positions here;
+        // doing so was the source of the visible staircase/catch-up jumps.
         const double dt = std::min(
             0.050, static_cast<double>(now - m_reverseVisualLastTick) / 1000.0);
         m_reverseVisualLastTick = now;
+        if (dt <= 0.0) return;
 
-        const double progressEpsilon = 0.001 / length;
-        if (confirmed < m_reverseVisualConfirmedPosition - progressEpsilon) {
-            // Fresh reverse audio progress. Reset the extrapolation age at this
-            // authoritative point; under normal callback cadence this is nearly
-            // continuous with the timer-derived position already on screen.
-            m_reverseVisualConfirmedPosition = confirmed;
-            m_reverseVisualConfirmedTick = now;
-        } else if (confirmed > m_reverseVisualConfirmedPosition + 0.050 / length) {
-            // Unexpected forward discontinuity (external transport change). Keep
-            // the clock bounded to the new authority rather than drifting away.
-            m_reverseVisualConfirmedPosition = confirmed;
-            m_reverseVisualConfirmedTick = now;
-        }
-
-        const double confirmedAge = std::min(
-            kReverseVisualLeadSeconds,
-            static_cast<double>(now - m_reverseVisualConfirmedTick) / 1000.0);
-        const double target = std::clamp(
-            m_reverseVisualConfirmedPosition - confirmedAge / length, 0.0, 1.0);
-
-        // Drive the display from a timer-rate target, but never hard-clamp to a
-        // newly confirmed DSP block. Hard clamps were the remaining visible
-        // staircase. If authority is behind the extrapolated display, simply
-        // wait for it to catch up; reverse motion must never jump forward.
-        double visual = m_reverseVisualPosition;
-        if (target < visual && dt > 0.0) {
-            const double nominal_step = dt / length;
-            const double gap = visual - target;
-            const double max_step = nominal_step * kReverseVisualMaxSpeed;
-            visual -= (std::min)(gap, max_step);
-        }
-
-        visual = (std::min)(visual, m_reverseVisualPosition);
-        m_reverseVisualPosition = std::clamp(visual, 0.0, 1.0);
+        m_reverseVisualPosition = std::clamp(
+            m_reverseVisualPosition - dt / length, 0.0, 1.0);
     }
 
     void begin_reverse_transport(bool latched) {
@@ -623,9 +588,7 @@ private:
         m_reverseKeyHeld = !latched;
         m_reverseVisualActive = true;
         m_reverseVisualPosition = positionFrac;
-        m_reverseVisualConfirmedPosition = positionFrac;
         m_reverseVisualLastTick = GetTickCount64();
-        m_reverseVisualConfirmedTick = m_reverseVisualLastTick;
         m_releaseGlideActive = false;
 
         if (pc->is_playing() && !pc->is_paused() && pc->playback_can_seek()) {
@@ -637,9 +600,16 @@ private:
 
     void end_reverse_transport() {
         if (!reverse_active()) return;
+
+        // The visible platter is the release authority. Audio reverse and the UI
+        // both run at 1x, but the DSP reports position only at block boundaries.
+        // Releasing from that coarse position caused the large final catch-up
+        // seen in the recording. Seek to exactly what the user sees instead.
         double positionFrac = 0.0;
-        if (!authoritative_transport_fraction(positionFrac) &&
-            !playback_fraction(positionFrac)) {
+        if (m_reverseVisualActive) {
+            positionFrac = std::clamp(m_reverseVisualPosition, 0.0, 1.0);
+        } else if (!authoritative_transport_fraction(positionFrac) &&
+                   !playback_fraction(positionFrac)) {
             positionFrac = m_touchHoldPosition;
         }
 
@@ -648,13 +618,13 @@ private:
         m_reverseLatched = false;
         m_reverseReturnToHold = false;
         m_reverseVisualActive = false;
+        m_releaseGlideActive = false;
 
         if (returnToHold) {
             m_touchHoldPosition = positionFrac;
             m_touchHoldAnchorX = 0.5;
             set_transport_hold(positionFrac);
         } else {
-            if (m_followPlayhead) begin_release_glide(positionFrac);
             release_transport_to(positionFrac);
         }
         invalidate_frame();
@@ -1904,9 +1874,7 @@ private:
     bool m_reverseReturnToHold = false;
     bool m_reverseVisualActive = false;
     ULONGLONG m_reverseVisualLastTick = 0;
-    ULONGLONG m_reverseVisualConfirmedTick = 0;
     double m_reverseVisualPosition = 0.0;
-    double m_reverseVisualConfirmedPosition = 0.0;
     bool m_transportReleasePending = false;
     bool m_releasePauseOwned = false;
     double m_transportReleaseTarget = 0.0;
