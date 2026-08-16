@@ -882,7 +882,10 @@ private:
         const double oldStart = m_viewStart;
         m_viewStart = m_releaseGlideStartView +
             (targetView - m_releaseGlideStartView) * eased;
-        m_viewStart = std::clamp(m_viewStart, 0.0, 1.0 - m_viewSpan);
+        // The glide may begin from a temporary centered-scrub overscroll. Do not
+        // snap that negative/after-EOF view back inside the file on the first
+        // release frame; the interpolation reaches targetView naturally.
+        m_viewStart = std::clamp(m_viewStart, -m_viewSpan, 1.0);
 
         if (t >= 1.0) m_releaseGlideActive = false;
         if (std::abs(m_viewStart - oldStart) > 1.0e-10 || t < 1.0) {
@@ -1341,8 +1344,14 @@ private:
                 m_touchHoldAnchorX = m_scrubAnchorX;
             }
 
+            // While the platter is physically grabbed, keep the selected sample
+            // under the fixed playhead even near 0:00 / end-of-track. Normal view
+            // clamping creates an invisible wall roughly half a view-width from
+            // either boundary. Temporary overscroll is rendered as blank space.
             m_viewStart = m_scrubTargetPosition - m_scrubAnchorX * m_viewSpan;
-            clamp_view();
+            const double scrubMinStart = -m_scrubAnchorX * m_viewSpan;
+            const double scrubMaxStart = 1.0 - m_scrubAnchorX * m_viewSpan;
+            m_viewStart = std::clamp(m_viewStart, scrubMinStart, scrubMaxStart);
 
             if (set_transport_scrub(m_scrubTargetPosition)) {
                 m_scrubAudibleActive = true;
@@ -1440,16 +1449,25 @@ private:
         const double leftFrac = m_viewStart + (static_cast<double>(x) / width) * m_viewSpan;
         const double rightFrac = m_viewStart + (static_cast<double>(x + 1) / width) * m_viewSpan;
 
+        // Centered platter scrubbing may temporarily overscroll beyond the file
+        // boundaries so 0:00 / EOF can stay under the fixed playhead. Anything
+        // outside the track is true blank space, not a stretched copy of the first
+        // or last waveform point.
+        if (rightFrac <= 0.0 || leftFrac >= 1.0) return out;
+        const double clippedLeftFrac = std::clamp(leftFrac, 0.0, 1.0);
+        const double clippedRightFrac = std::clamp(rightFrac, 0.0, 1.0);
+        if (clippedRightFrac <= clippedLeftFrac) return out;
+
         if (data.duration_seconds > 0.0) {
-            const double startSeconds = leftFrac * data.duration_seconds;
-            const double endSeconds = rightFrac * data.duration_seconds;
+            const double startSeconds = clippedLeftFrac * data.duration_seconds;
+            const double endSeconds = clippedRightFrac * data.duration_seconds;
             if (spectral_waveform::live_output_capture::aggregate(startSeconds, endSeconds, out)) {
                 return out;
             }
         }
 
-        size_t begin = static_cast<size_t>(std::floor(leftFrac * count));
-        size_t end = static_cast<size_t>(std::ceil(rightFrac * count));
+        size_t begin = static_cast<size_t>(std::floor(clippedLeftFrac * count));
+        size_t end = static_cast<size_t>(std::ceil(clippedRightFrac * count));
         begin = std::min(begin, count - 1);
         end = std::max(begin + 1, std::min(end, count));
 
@@ -1590,10 +1608,13 @@ private:
             }
         }
 
-        const double viewStartSeconds = m_viewStart * durationSeconds;
-        const double viewEndSeconds = view_end() * durationSeconds;
+        const double viewStartSeconds = std::max(0.0, m_viewStart * durationSeconds);
+        const double viewEndSeconds = std::min(
+            durationSeconds, (m_viewStart + m_viewSpan) * durationSeconds);
+        if (viewEndSeconds <= viewStartSeconds) return;
         const double epsilon = step * 1.0e-8;
-        double first = std::ceil((viewStartSeconds - epsilon) / step) * step;
+        double first = std::max(
+            0.0, std::ceil((viewStartSeconds - epsilon) / step) * step);
 
         const COLORREF foreground = query_color(ui_color_text, COLOR_WINDOWTEXT);
         const COLORREF background = query_color(ui_color_background, COLOR_WINDOW);
