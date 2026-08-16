@@ -1,0 +1,27 @@
+name: Apply tight hold latency patch
+
+on:
+  push:
+    paths:
+      - '.github/tight_hold_patch.py'
+      - '.github/workflows/apply-tight-hold.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python .github/tight_hold_patch.py
+      - name: Commit source change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add spectral_ui.cpp
+          git diff --cached --quiet && exit 0
+          git commit -m "Tighten hold and scrub-stop response"
+          git push
