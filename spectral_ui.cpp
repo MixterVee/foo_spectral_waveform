@@ -98,6 +98,7 @@ enum : UINT {
     kMenuFollowCentered,
     kMenuFollowPaged,
     kMenuHoldPlayback,
+    kMenuReversePlayback,
     kMenuShowTimeMarkers,
     kMenuReanalyze,
 };
@@ -864,6 +865,14 @@ private:
                 kMenuHoldPlayback,
                 m_touchHoldLatched ? L"Release Playback\tH" : L"Hold Playback\tH");
         }
+        {
+            const bool canReverse = reverse_active() || touch_hold_can_start();
+            const bool reversing = reverse_active();
+            UINT flags = MF_STRING | (canReverse ? 0 : MF_GRAYED);
+            if (m_reverseLatched) flags |= MF_CHECKED;
+            AppendMenuW(menu, flags, kMenuReversePlayback,
+                reversing ? L"Release Reverse\tR / Shift+R" : L"Reverse Playback\tShift+R");
+        }
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (g_showTimeMarkers.get() ? MF_CHECKED : 0),
             kMenuShowTimeMarkers, L"Show Time Markers");
@@ -947,6 +956,10 @@ private:
             break;
         case kMenuHoldPlayback:
             toggle_touch_hold();
+            break;
+        case kMenuReversePlayback:
+            if (reverse_active()) end_reverse_transport();
+            else begin_reverse_transport(true);
             break;
         case kMenuShowTimeMarkers:
             g_showTimeMarkers = !g_showTimeMarkers.get();
