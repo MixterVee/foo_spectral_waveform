@@ -45,6 +45,10 @@ static constexpr int kLiveRefreshAhead = 40;
 // the final seek on release; longer drags audition the latest position at a
 // relaxed rate so the decoder/DSP chain does not chatter.
 static constexpr ULONGLONG kScrubSeekIntervalMs = 250;
+// Keep audible jog alive briefly after the most recent real mouse movement.
+// The timer explicitly returns transport to HOLD after this quiet period, so
+// slow drags do not fall through a fixed audio timeout while the hand is moving.
+static constexpr ULONGLONG kScrubMotionTailMs = 220;
 static constexpr ULONGLONG kGrabClickThresholdMs = 350;
 static constexpr ULONGLONG kReleaseGlideDurationMs = 260;
 static constexpr UINT kMenuStemBase = 1000;
@@ -193,6 +197,7 @@ private:
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
         case WM_TIMER: {
+            update_scrub_motion_gate();
             update_transport_release_wait();
             bool viewChanged = update_release_glide();
             if (!viewChanged) viewChanged = update_follow_view();
@@ -273,6 +278,7 @@ private:
             m_dragging = false;
             m_dragMoved = false;
             m_centerScrubbing = false;
+            m_scrubAudibleActive = false;
             // If capture is lost unexpectedly (Alt-Tab, another popup, etc.),
             // commit the virtual platter position exactly once.
             if (lostCenteredGrab) {
@@ -377,6 +383,27 @@ private:
         } catch (...) {
             return false;
         }
+    }
+
+    void update_scrub_motion_gate() {
+        if (!m_centerScrubbing || !m_dragging || !m_dragMoved ||
+            !m_scrubAudibleActive) return;
+
+        const ULONGLONG now = GetTickCount64();
+        if (now - m_scrubLastMotionTick <= kScrubMotionTailMs) {
+            // Keepalive only. The matching Stem Separator build detects an
+            // unchanged target and extends audibility without rewinding the
+            // preview cursor back to the same sample every timer tick.
+            if (!set_transport_scrub(m_scrubTargetPosition)) {
+                m_scrubAudibleActive = false;
+            }
+            return;
+        }
+
+        // No real mouse movement recently: return to the stationary platter
+        // state immediately instead of waiting for an internal audio timeout.
+        set_transport_hold(m_scrubTargetPosition);
+        m_scrubAudibleActive = false;
     }
 
     void pause_for_touch_fallback() {
@@ -1007,6 +1034,9 @@ private:
         // Do not seek immediately on the first few pixels of a grab. If the
         // gesture is short, release performs the only seek and feels much cleaner.
         m_scrubLastSeekTick = m_dragStartTick;
+        m_scrubLastMotionTick = m_dragStartTick;
+        m_scrubLastMotionX = x;
+        m_scrubAudibleActive = false;
         m_centerScrubbing = false;
 
         double positionFrac = 0.0;
@@ -1041,6 +1071,12 @@ private:
         const int width = rc.right - rc.left;
         if (width <= 1) return;
 
+        const ULONGLONG motionNow = GetTickCount64();
+        if (x != m_scrubLastMotionX) {
+            m_scrubLastMotionX = x;
+            m_scrubLastMotionTick = motionNow;
+        }
+
         const int dx = x - m_dragStartX;
         if (std::abs(dx) >= 3) {
             m_dragMoved = true;
@@ -1063,9 +1099,12 @@ private:
             m_viewStart = m_scrubTargetPosition - m_scrubAnchorX * m_viewSpan;
             clamp_view();
 
-            if (!set_transport_scrub(m_scrubTargetPosition)) {
+            if (set_transport_scrub(m_scrubTargetPosition)) {
+                m_scrubAudibleActive = true;
+            } else {
+                m_scrubAudibleActive = false;
                 // Compatibility fallback for the pre-transport Stem Separator.
-                const ULONGLONG now = GetTickCount64();
+                const ULONGLONG now = motionNow;
                 if (m_scrubLastSeekTick == 0 ||
                     now - m_scrubLastSeekTick >= kScrubSeekIntervalMs) {
                     auto pc = playback_control::get();
@@ -1096,6 +1135,7 @@ private:
         m_dragging = false;
         m_dragMoved = false;
         m_centerScrubbing = false;
+        m_scrubAudibleActive = false;
         if (GetCapture() == m_wnd) ReleaseCapture();
 
         if (centeredScrub) {
@@ -1641,6 +1681,7 @@ private:
         m_touchHoldLatched = false;
         m_touchPauseOwned = false;
         m_centerScrubbing = false;
+        m_scrubAudibleActive = false;
         m_reverseKeyHeld = false;
         m_reverseLatched = false;
         m_reverseReturnToHold = false;
@@ -1654,6 +1695,7 @@ private:
         m_touchHoldLatched = false;
         m_touchPauseOwned = false;
         m_centerScrubbing = false;
+        m_scrubAudibleActive = false;
         m_reverseKeyHeld = false;
         m_reverseLatched = false;
         m_reverseReturnToHold = false;
@@ -1713,6 +1755,9 @@ private:
     double m_dragStartView = 0.0;
     ULONGLONG m_dragStartTick = 0;
     ULONGLONG m_scrubLastSeekTick = 0;
+    ULONGLONG m_scrubLastMotionTick = 0;
+    int m_scrubLastMotionX = 0;
+    bool m_scrubAudibleActive = false;
     double m_scrubStartPosition = 0.0;
     double m_scrubTargetPosition = 0.0;
     double m_scrubAnchorX = 0.5;
