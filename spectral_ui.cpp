@@ -40,6 +40,7 @@ static constexpr int kLiveRefreshAhead = 40;
 // relaxed rate so the decoder/DSP chain does not chatter.
 static constexpr ULONGLONG kScrubSeekIntervalMs = 250;
 static constexpr ULONGLONG kGrabClickThresholdMs = 350;
+static constexpr ULONGLONG kReleaseGlideDurationMs = 260;
 static constexpr UINT kMenuStemBase = 1000;
 
 enum stem_menu_command : unsigned {
@@ -177,7 +178,8 @@ private:
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
         case WM_TIMER: {
-            const bool viewChanged = update_follow_view();
+            bool viewChanged = update_release_glide();
+            if (!viewChanged) viewChanged = update_follow_view();
             if (spectral_waveform::live_output_capture::animation_active()) {
                 // Progressive stem blocks dissolve into place for a few frames.
                 // Rebuild the bitmap only while that short visual transition runs.
@@ -256,6 +258,7 @@ private:
     }
 
     void reset_view() {
+        m_releaseGlideActive = false;
         m_viewStart = 0.0;
         m_viewSpan = 1.0;
         m_followPlayhead = false;
@@ -287,11 +290,77 @@ private:
     }
 
     void recenter_on_playhead() {
+        m_releaseGlideActive = false;
         center_on_playhead_once();
     }
 
+    void begin_release_glide(double targetPosition) {
+        if (!m_followPlayhead || m_followMode != follow_mode::centered ||
+            m_viewSpan >= 0.9995 || m_wnd == nullptr) {
+            m_releaseGlideActive = false;
+            return;
+        }
+
+        m_releaseGlideActive = true;
+        m_releaseGlideStartTick = GetTickCount64();
+        m_releaseGlideStartView = m_viewStart;
+        m_releaseGlideTargetPosition = std::clamp(targetPosition, 0.0, 1.0);
+        invalidate_frame();
+    }
+
+    double release_glide_position() const {
+        if (!m_releaseGlideActive) return -1.0;
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        if (length <= 0.0) return m_releaseGlideTargetPosition;
+
+        const ULONGLONG elapsedMs = GetTickCount64() - m_releaseGlideStartTick;
+        const double advance = pc->is_playing()
+            ? (static_cast<double>(elapsedMs) / 1000.0) / length
+            : 0.0;
+        return std::clamp(m_releaseGlideTargetPosition + advance, 0.0, 1.0);
+    }
+
+    bool update_release_glide() {
+        if (!m_releaseGlideActive || m_dragging || m_wnd == nullptr ||
+            m_viewSpan >= 0.9995 || !m_followPlayhead ||
+            m_followMode != follow_mode::centered) {
+            m_releaseGlideActive = false;
+            return false;
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        const ULONGLONG elapsedMs = now - m_releaseGlideStartTick;
+        const double t = std::clamp(
+            static_cast<double>(elapsedMs) / static_cast<double>(kReleaseGlideDurationMs),
+            0.0, 1.0);
+        // Smoothstep-like cubic ease-out: fast enough to feel responsive, with a
+        // soft landing as normal centered follow resumes.
+        const double eased = 1.0 - std::pow(1.0 - t, 3.0);
+        const double virtualPosition = release_glide_position();
+        if (virtualPosition < 0.0) {
+            m_releaseGlideActive = false;
+            return false;
+        }
+
+        double targetView = virtualPosition - m_viewSpan * 0.5;
+        targetView = std::clamp(targetView, 0.0, 1.0 - m_viewSpan);
+        const double oldStart = m_viewStart;
+        m_viewStart = m_releaseGlideStartView +
+            (targetView - m_releaseGlideStartView) * eased;
+        m_viewStart = std::clamp(m_viewStart, 0.0, 1.0 - m_viewSpan);
+
+        if (t >= 1.0) m_releaseGlideActive = false;
+        if (std::abs(m_viewStart - oldStart) > 1.0e-10 || t < 1.0) {
+            invalidate_frame();
+            return true;
+        }
+        return false;
+    }
+
     bool update_follow_view() {
-        if (!m_followPlayhead || m_viewSpan >= 0.9995 || m_dragging || m_wnd == nullptr) return false;
+        if (m_releaseGlideActive || !m_followPlayhead || m_viewSpan >= 0.9995 ||
+            m_dragging || m_wnd == nullptr) return false;
         if (!playback_control::get()->is_playing()) return false;
         double positionFrac = 0.0;
         if (!playback_fraction(positionFrac)) return false;
@@ -332,6 +401,13 @@ private:
         if (m_centerScrubbing) {
             const double anchor = std::clamp(m_scrubAnchorX, 0.0, 1.0);
             return static_cast<int>(std::lround(anchor * std::max(0, width - 1)));
+        }
+
+        if (m_releaseGlideActive) {
+            const double positionFrac = release_glide_position();
+            if (positionFrac < 0.0 || positionFrac < m_viewStart || positionFrac > view_end()) return -1;
+            const double visibleFrac = (positionFrac - m_viewStart) / m_viewSpan;
+            return static_cast<int>(std::lround(visibleFrac * std::max(0, width - 1)));
         }
 
         auto pc = playback_control::get();
@@ -607,6 +683,7 @@ private:
 
     void begin_drag(int x) {
         if (m_wnd == nullptr) return;
+        m_releaseGlideActive = false;
         m_dragging = true;
         m_dragMoved = false;
         m_dragStartX = x;
@@ -702,7 +779,11 @@ private:
                 if (pc->is_playing() && pc->playback_can_seek() && length > 0.0) {
                     pc->playback_seek(m_scrubTargetPosition * length);
                 }
-                if (m_followPlayhead) recenter_on_playhead();
+                // Do not immediately query playback_get_position() here. Right
+                // after a seek it can briefly report the preceding audition
+                // position, which caused the visible release snap. Use the exact
+                // scrub target for a short visual handoff, then resume follow.
+                if (m_followPlayhead) begin_release_glide(m_scrubTargetPosition);
             } else if (heldMs < kGrabClickThresholdMs) {
                 // Preserve the existing quick click-to-seek action. A longer hold
                 // with no movement simply freezes centered scrolling temporarily.
@@ -1216,7 +1297,7 @@ private:
     void on_playback_seek(double) override {
         // Continuous seeks generated by a centered grab must not fight the user's
         // drag by recentering the view on every seek callback.
-        if (m_centerScrubbing) {
+        if (m_centerScrubbing || m_releaseGlideActive) {
             invalidate_playhead();
             return;
         }
@@ -1258,6 +1339,10 @@ private:
     double m_scrubStartPosition = 0.0;
     double m_scrubTargetPosition = 0.0;
     double m_scrubAnchorX = 0.5;
+    bool m_releaseGlideActive = false;
+    ULONGLONG m_releaseGlideStartTick = 0;
+    double m_releaseGlideStartView = 0.0;
+    double m_releaseGlideTargetPosition = 0.0;
 
     HDC m_waveDC = nullptr;
     HBITMAP m_waveBitmap = nullptr;
