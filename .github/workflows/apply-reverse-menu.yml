@@ -1,0 +1,29 @@
+name: Apply reverse playback menu
+
+on:
+  push:
+    paths:
+      - '.github/add_reverse_menu.py'
+      - '.github/workflows/apply-reverse-menu.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply reverse menu patch
+        run: python .github/add_reverse_menu.py
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add spectral_ui.cpp
+          git diff --cached --quiet && exit 0
+          git commit -m "Add reverse playback to waveform menu"
+          git push
