@@ -12,11 +12,13 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <string>
 
 #include "spectral_analyzer.h"
 #include "spectral_palette.h"
 #include "waveform_cache.h"
 #include "live_output_capture.h"
+#include "stem_waveform_analysis.h"
 
 namespace {
 
@@ -33,8 +35,44 @@ static constexpr double kMinViewSpan = 0.02;
 static constexpr double kKeyboardPanFraction = 0.10;
 static constexpr int kLiveRefreshBehind = 160;
 static constexpr int kLiveRefreshAhead = 40;
-static constexpr ULONGLONG kScrubSeekIntervalMs = 90;
+// Centered grab scrubbing is intentionally coalesced. Short drags make only
+// the final seek on release; longer drags audition the latest position at a
+// relaxed rate so the decoder/DSP chain does not chatter.
+static constexpr ULONGLONG kScrubSeekIntervalMs = 250;
 static constexpr ULONGLONG kGrabClickThresholdMs = 350;
+static constexpr UINT kMenuStemBase = 1000;
+
+enum stem_menu_command : unsigned {
+    kStemOriginal = 0,
+    kStemVocals,
+    kStemInstrumental,
+    kStemSaveVocalsWav,
+    kStemSaveInstrumentalWav,
+    kStemSaveVocalsMp3,
+    kStemSaveInstrumentalMp3,
+    kStemPrecache,
+    kStemCommandCount
+};
+
+static const GUID kStemCommandGuids[kStemCommandCount] = {
+    {0xa92a1001,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x01}},
+    {0xa92a1002,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x02}},
+    {0xa92a1003,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x03}},
+    {0xa92a1004,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x04}},
+    {0xa92a1005,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x05}},
+    {0xa92a1006,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x06}},
+    {0xa92a1007,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x07}},
+    {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}}
+};
+
+std::wstring utf8_menu_text(const char* text) {
+    if (text == nullptr || *text == 0) return {};
+    const int count = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+    if (count <= 1) return {};
+    std::wstring out(static_cast<size_t>(count - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, out.data(), count);
+    return out;
+}
 
 enum : UINT {
     kMenuZoomIn = 1,
@@ -286,6 +324,15 @@ private:
 
     int current_playhead_x(int width) const {
         if (width <= 0) return -1;
+
+        // While the user grabs a centered-follow waveform, the play position is
+        // the stationary reference and the waveform moves underneath it. Do not
+        // let intermediate playback_seek callbacks make the blue line jump.
+        if (m_centerScrubbing) {
+            const double anchor = std::clamp(m_scrubAnchorX, 0.0, 1.0);
+            return static_cast<int>(std::lround(anchor * std::max(0, width - 1)));
+        }
+
         auto pc = playback_control::get();
         if (!pc->is_playing()) return -1;
         double positionFrac = 0.0;
@@ -385,6 +432,45 @@ private:
         invalidate_frame();
     }
 
+    bool resolve_stem_command(unsigned command, service_ptr_t<contextmenu_item>& item, t_uint32& index) const {
+        if (command >= kStemCommandCount) return false;
+        return menu_item_resolver::g_resolve_context_command(kStemCommandGuids[command], item, index);
+    }
+
+    std::wstring stem_command_name(unsigned command, const wchar_t* fallback) const {
+        service_ptr_t<contextmenu_item> item;
+        t_uint32 index = 0;
+        if (!resolve_stem_command(command, item, index) || m_currentTrack.is_empty()) return fallback;
+
+        metadb_handle_list data;
+        data.add_item(m_currentTrack);
+        pfc::string8 text;
+        unsigned flags = 0;
+        if (!item->item_get_display_data_root(
+                text, flags, index, data, contextmenu_item::caller_now_playing)) return fallback;
+
+        const std::wstring converted = utf8_menu_text(text.c_str());
+        return converted.empty() ? std::wstring(fallback) : converted;
+    }
+
+    void execute_stem_command(unsigned command) {
+        if (m_currentTrack.is_empty()) return;
+
+        service_ptr_t<contextmenu_item> item;
+        t_uint32 index = 0;
+        if (!resolve_stem_command(command, item, index)) return;
+
+        metadb_handle_list data;
+        data.add_item(m_currentTrack);
+        item->item_execute_simple(index, pfc::guid_null, data, contextmenu_item::caller_now_playing);
+
+        // The normal separator context menu is observed on the next playback-time
+        // callback. A menu embedded in the waveform should update immediately,
+        // including while playback is paused.
+        spectral_waveform::live_output_capture::refresh_mode();
+        invalidate_all();
+    }
+
     void show_context_menu(int screenX, int screenY) {
         if (m_wnd == nullptr) return;
         SetFocus(m_wnd);
@@ -417,6 +503,40 @@ private:
         AppendMenuW(menu, MF_STRING | (g_showTimeMarkers.get() ? MF_CHECKED : 0),
             kMenuShowTimeMarkers, L"Show Time Markers");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+        // Mirror Stem Separator's registered context commands rather than
+        // duplicating its DSP/export implementation in this component.
+        HMENU stemMenu = CreatePopupMenu();
+        if (stemMenu != nullptr) {
+            service_ptr_t<contextmenu_item> probe;
+            t_uint32 probeIndex = 0;
+            const bool stemAvailable = resolve_stem_command(kStemOriginal, probe, probeIndex);
+            const bool stemEnabled = stemAvailable && !m_currentTrack.is_empty();
+            const int stemMode = stemAvailable ? spectral_waveform::current_stem_mode() : -1;
+
+            auto addStem = [&](unsigned commandIndex, const wchar_t* fallback, bool checked = false) {
+                const std::wstring label = stem_command_name(commandIndex, fallback);
+                UINT flags = MF_STRING | (stemEnabled ? 0 : MF_GRAYED);
+                if (checked) flags |= MF_CHECKED;
+                AppendMenuW(stemMenu, flags, kMenuStemBase + commandIndex, label.c_str());
+            };
+
+            addStem(kStemOriginal, L"Original", stemMode == 0);
+            addStem(kStemVocals, L"Vocals", stemMode == 1);
+            addStem(kStemInstrumental, L"Instrumental", stemMode == 2);
+            AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
+            addStem(kStemSaveVocalsWav, L"Save Vocals as WAV...");
+            addStem(kStemSaveInstrumentalWav, L"Save Instrumental as WAV...");
+            addStem(kStemSaveVocalsMp3, L"Save Vocals as MP3...");
+            addStem(kStemSaveInstrumentalMp3, L"Save Instrumental as MP3...");
+            AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
+            addStem(kStemPrecache, L"Pre-cache at track start");
+
+            AppendMenuW(menu, MF_POPUP | (stemAvailable ? 0 : MF_GRAYED),
+                reinterpret_cast<UINT_PTR>(stemMenu), L"Stem Separator");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
+
         AppendMenuW(menu, MF_STRING | (m_currentTrack.is_empty() ? MF_GRAYED : 0),
             kMenuReanalyze, L"Re-analyze Current Track");
 
@@ -424,6 +544,11 @@ private:
             TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
             pt.x, pt.y, 0, m_wnd, nullptr);
         DestroyMenu(menu);
+
+        if (command >= kMenuStemBase && command < kMenuStemBase + kStemCommandCount) {
+            execute_stem_command(command - kMenuStemBase);
+            return;
+        }
 
         switch (command) {
         case kMenuZoomIn:
@@ -486,7 +611,9 @@ private:
         m_dragStartX = x;
         m_dragStartView = m_viewStart;
         m_dragStartTick = GetTickCount64();
-        m_scrubLastSeekTick = 0;
+        // Do not seek immediately on the first few pixels of a grab. If the
+        // gesture is short, release performs the only seek and feels much cleaner.
+        m_scrubLastSeekTick = m_dragStartTick;
         m_centerScrubbing = false;
 
         double positionFrac = 0.0;

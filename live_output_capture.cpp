@@ -364,6 +364,12 @@ public:
         if (g_manager) g_manager->request(m_track, m_lastMode, position);
     }
 
+    void refresh_now() {
+        m_lastMode = current_stem_mode();
+        const double position = std::max(0.0, playback_control::get()->playback_get_position());
+        if (g_manager) g_manager->request(m_track, m_lastMode, position);
+    }
+
     void force_mode_refresh() {
         m_lastMode = -999;
     }
@@ -545,6 +551,10 @@ bool animation_active() {
     if (!havePrevious) return false;
 
     return GetTickCount64() - g_previewFadeStart < kPreviewFadeMs;
+}
+
+void refresh_mode() {
+    if (g_observer) g_observer->refresh_now();
 }
 
 void reset() {

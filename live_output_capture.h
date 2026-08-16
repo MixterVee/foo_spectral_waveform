@@ -18,6 +18,10 @@ bool aggregate(double start_seconds, double end_seconds, waveform_point& out);
 // this to repaint at its normal timer cadence while the visual crossfade runs.
 bool animation_active();
 
+// Re-read the current Stem Separator mode and publish/select its preview now.
+// Used by controls embedded in the waveform so paused playback updates instantly.
+void refresh_mode();
+
 // Clears the active previews and invalidates the current stem-analysis
 // generation so stale workers cannot recreate caches during manual recovery.
 void reset();
