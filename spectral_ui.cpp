@@ -19,6 +19,12 @@
 #include "waveform_cache.h"
 #include "live_output_capture.h"
 #include "stem_waveform_analysis.h"
+#include "stem_transport_service.h"
+
+#undef FOOGUIDDECL
+#define FOOGUIDDECL
+FOOGUIDDECL const GUID stem_transport_service::class_guid =
+{ 0x3f42b0c7, 0x8df1, 0x4fb9, { 0xa6, 0x7d, 0x21, 0x55, 0x91, 0xc8, 0x43, 0x6e } };
 
 namespace {
 
@@ -65,6 +71,13 @@ static const GUID kStemCommandGuids[kStemCommandCount] = {
     {0xa92a1007,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x07}},
     {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}}
 };
+
+stem_transport_service::ptr find_transport_service() {
+    stem_transport_service::ptr service;
+    auto e = stem_transport_service::enumerate();
+    if (!e.first(service)) service.release();
+    return service;
+}
 
 std::wstring utf8_menu_text(const char* text) {
     if (text == nullptr || *text == 0) return {};
@@ -179,6 +192,7 @@ private:
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
         case WM_TIMER: {
+            update_transport_release_wait();
             bool viewChanged = update_release_glide();
             if (!viewChanged) viewChanged = update_follow_view();
             if (spectral_waveform::live_output_capture::animation_active()) {
@@ -212,6 +226,17 @@ private:
             case 'H':
                 toggle_touch_hold();
                 return 0;
+            case 'R': {
+                const bool repeat = (lp & (static_cast<LPARAM>(1) << 30)) != 0;
+                if (repeat) return 0;
+                const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                if (reverse_active()) {
+                    if (m_reverseLatched) end_reverse_transport();
+                } else {
+                    begin_reverse_transport(shift);
+                }
+                return 0;
+            }
             case VK_UP:
                 zoom_from_keyboard(true);
                 return 0;
@@ -223,6 +248,12 @@ private:
                 return 0;
             case VK_RIGHT:
                 pan_from_keyboard(1);
+                return 0;
+            }
+            break;
+        case WM_KEYUP:
+            if (wp == 'R' && m_reverseKeyHeld) {
+                end_reverse_transport();
                 return 0;
             }
             break;
@@ -242,11 +273,15 @@ private:
             m_dragMoved = false;
             m_centerScrubbing = false;
             // If capture is lost unexpectedly (Alt-Tab, another popup, etc.),
-            // never leave a momentary platter touch holding playback paused.
-            if (lostCenteredGrab && !m_touchHoldLatched) {
+            // commit the virtual platter position exactly once.
+            if (lostCenteredGrab) {
                 const double target = m_scrubTargetPosition;
-                if (m_followPlayhead) begin_release_glide(target);
-                resume_touch_pause();
+                if (m_touchHoldLatched) {
+                    set_transport_hold(target);
+                } else {
+                    if (m_followPlayhead) begin_release_glide(target);
+                    release_transport_to(target);
+                }
             }
             return 0;
         }
@@ -271,6 +306,7 @@ private:
     }
 
     void reset_view() {
+        if (reverse_active()) end_reverse_transport();
         if (m_touchHoldLatched && !m_dragging) release_touch_hold();
         m_releaseGlideActive = false;
         m_viewStart = 0.0;
@@ -290,6 +326,18 @@ private:
         auto pc = playback_control::get();
         const double length = pc->playback_get_length_ex();
         if (length <= 0.0) return false;
+
+        auto transport = find_transport_service();
+        if (!transport.is_empty()) {
+            try {
+                if (transport->get_state() != stem_transport_normal) {
+                    out = std::clamp(
+                        transport->get_position_seconds() / length, 0.0, 1.0);
+                    return true;
+                }
+            } catch (...) {}
+        }
+
         out = std::clamp(pc->playback_get_position() / length, 0.0, 1.0);
         return true;
     }
@@ -300,25 +348,161 @@ private:
             m_followMode == follow_mode::centered &&
             m_viewSpan < 0.9995 &&
             pc->is_playing() &&
+            !pc->is_paused() &&
             pc->playback_can_seek();
     }
 
-    void pause_for_touch() {
+    bool set_transport_hold(double positionFrac) {
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        auto transport = find_transport_service();
+        if (length <= 0.0 || transport.is_empty()) return false;
+        try {
+            transport->set_hold(std::clamp(positionFrac, 0.0, 1.0) * length);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool set_transport_scrub(double positionFrac) {
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        auto transport = find_transport_service();
+        if (length <= 0.0 || transport.is_empty()) return false;
+        try {
+            transport->set_scrub(std::clamp(positionFrac, 0.0, 1.0) * length);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    void pause_for_touch_fallback() {
         auto pc = playback_control::get();
         if (!pc->is_playing()) return;
         if (!pc->is_paused()) {
-            // Remember ownership so we only unpause playback that *we* paused.
             m_touchPauseOwned = true;
             pc->pause(true);
         }
     }
 
-    void resume_touch_pause() {
+    void resume_touch_pause_fallback() {
         auto pc = playback_control::get();
         if (m_touchPauseOwned && pc->is_playing() && pc->is_paused()) {
             pc->pause(false);
         }
         m_touchPauseOwned = false;
+    }
+
+    void update_transport_release_wait() {
+        if (!m_transportReleasePending) return;
+
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        auto transport = find_transport_service();
+        if (length <= 0.0 || transport.is_empty()) {
+            m_transportReleasePending = false;
+            if (m_releasePauseOwned && pc->is_playing() && pc->is_paused()) pc->pause(false);
+            m_releasePauseOwned = false;
+            return;
+        }
+
+        bool ready = false;
+        try {
+            ready = transport->is_position_ready(m_transportReleaseTarget * length);
+        } catch (...) {
+            ready = true;
+        }
+        if (!ready) return;
+
+        m_transportReleasePending = false;
+        if (m_releasePauseOwned && pc->is_playing() && pc->is_paused()) {
+            pc->pause(false);
+        }
+        m_releasePauseOwned = false;
+        invalidate_frame();
+    }
+
+    bool release_transport_to(double positionFrac) {
+        positionFrac = std::clamp(positionFrac, 0.0, 1.0);
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        if (!pc->is_playing() || !pc->playback_can_seek() || length <= 0.0) return false;
+
+        auto transport = find_transport_service();
+        if (!transport.is_empty()) {
+            const double seconds = positionFrac * length;
+            bool ready = true;
+            try {
+                transport->release_transport(seconds);
+                pc->playback_seek(seconds);
+                ready = transport->is_position_ready(seconds);
+            } catch (...) {
+                ready = true;
+            }
+
+            m_transportReleaseTarget = positionFrac;
+            m_transportReleasePending = !ready;
+            if (!ready && !pc->is_paused()) {
+                pc->pause(true);
+                m_releasePauseOwned = true;
+            }
+            return true;
+        }
+
+        // Compatibility fallback for an older Stem Separator build.
+        pc->playback_seek(positionFrac * length);
+        resume_touch_pause_fallback();
+        return false;
+    }
+
+    bool reverse_active() const {
+        return m_reverseKeyHeld || m_reverseLatched;
+    }
+
+    void begin_reverse_transport(bool latched) {
+        if (m_transportReleasePending || !touch_hold_can_start()) return;
+        double positionFrac = 0.0;
+        if (!playback_fraction(positionFrac)) return;
+
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        auto transport = find_transport_service();
+        if (length <= 0.0 || transport.is_empty()) return;
+
+        try {
+            transport->set_reverse(positionFrac * length);
+        } catch (...) {
+            return;
+        }
+
+        m_reverseReturnToHold = m_touchHoldLatched;
+        m_reverseLatched = latched;
+        m_reverseKeyHeld = !latched;
+        m_releaseGlideActive = false;
+        invalidate_frame();
+    }
+
+    void end_reverse_transport() {
+        if (!reverse_active()) return;
+        double positionFrac = 0.0;
+        if (!playback_fraction(positionFrac)) positionFrac = m_touchHoldPosition;
+
+        const bool returnToHold = m_touchHoldLatched || m_reverseReturnToHold;
+        m_reverseKeyHeld = false;
+        m_reverseLatched = false;
+        m_reverseReturnToHold = false;
+
+        if (returnToHold) {
+            m_touchHoldPosition = positionFrac;
+            m_touchHoldAnchorX = 0.5;
+            set_transport_hold(positionFrac);
+        } else {
+            if (m_followPlayhead) begin_release_glide(positionFrac);
+            release_transport_to(positionFrac);
+        }
+        invalidate_frame();
     }
 
     void release_touch_hold() {
@@ -328,19 +512,25 @@ private:
         if (m_followPlayhead && m_followMode == follow_mode::centered) {
             begin_release_glide(target);
         }
-        resume_touch_pause();
+        release_transport_to(target);
         invalidate_frame();
     }
 
     void toggle_touch_hold() {
+        // H while reverse is running only changes what happens when reverse ends.
+        if (reverse_active()) {
+            m_touchHoldLatched = !m_touchHoldLatched;
+            m_reverseReturnToHold = m_touchHoldLatched;
+            invalidate_frame();
+            return;
+        }
+
         // While the mouse is physically down, H only arms/disarms the latch.
-        // The platter remains paused until mouse-up either way.
         if (m_centerScrubbing) {
             m_touchHoldLatched = !m_touchHoldLatched;
             if (m_touchHoldLatched) {
                 m_touchHoldPosition = m_scrubTargetPosition;
                 m_touchHoldAnchorX = m_scrubAnchorX;
-                pause_for_touch();
             }
             invalidate_frame();
             return;
@@ -360,7 +550,7 @@ private:
         m_touchHoldPosition = positionFrac;
         m_touchHoldAnchorX = std::clamp(
             (positionFrac - m_viewStart) / m_viewSpan, 0.0, 1.0);
-        pause_for_touch();
+        if (!set_transport_hold(positionFrac)) pause_for_touch_fallback();
         invalidate_frame();
     }
 
@@ -443,7 +633,7 @@ private:
     }
 
     bool update_follow_view() {
-        if (m_touchHoldLatched || m_releaseGlideActive || !m_followPlayhead ||
+        if ((m_touchHoldLatched && !reverse_active()) || m_releaseGlideActive || !m_followPlayhead ||
             m_viewSpan >= 0.9995 || m_dragging || m_wnd == nullptr) return false;
         auto pc = playback_control::get();
         if (!pc->is_playing() || pc->is_paused()) return false;
@@ -488,7 +678,7 @@ private:
             return static_cast<int>(std::lround(anchor * std::max(0, width - 1)));
         }
 
-        if (m_touchHoldLatched) {
+        if (m_touchHoldLatched && !reverse_active()) {
             const double anchor = std::clamp(m_touchHoldAnchorX, 0.0, 1.0);
             return static_cast<int>(std::lround(anchor * std::max(0, width - 1)));
         }
@@ -750,6 +940,7 @@ private:
             else invalidate_frame();
             break;
         case kMenuFollowPaged:
+            if (reverse_active()) end_reverse_transport();
             if (m_touchHoldLatched) release_touch_hold();
             m_followMode = follow_mode::paged;
             if (m_followPlayhead) invalidate_frame();
@@ -784,7 +975,16 @@ private:
     }
 
     void begin_drag(int x) {
-        if (m_wnd == nullptr) return;
+        if (m_wnd == nullptr || m_transportReleasePending) return;
+        if (reverse_active()) {
+            double reversePos = 0.0;
+            if (playback_fraction(reversePos)) {
+                m_reverseKeyHeld = false;
+                m_reverseLatched = false;
+                m_reverseReturnToHold = false;
+                set_transport_hold(reversePos);
+            }
+        }
         m_releaseGlideActive = false;
         m_dragging = true;
         m_dragMoved = false;
@@ -813,10 +1013,9 @@ private:
             m_touchHoldPosition = positionFrac;
             m_touchHoldAnchorX = m_scrubAnchorX;
 
-            // DJ-platter semantics: touching the centered waveform stops the
-            // music immediately. Seeking while held changes the queued position;
-            // playback only resumes when the touch is released (unless latched).
-            pause_for_touch();
+            // Keep foobar's audio clock alive; Stem Separator replaces its output
+            // with silence so the platter is audibly stationary and can still jog.
+            if (!set_transport_hold(positionFrac)) pause_for_touch_fallback();
         }
 
         SetCapture(m_wnd);
@@ -851,16 +1050,17 @@ private:
             m_viewStart = m_scrubTargetPosition - m_scrubAnchorX * m_viewSpan;
             clamp_view();
 
-            // Seek often enough to audition the new location while dragging, but
-            // not on every mouse event so the decoder/DSP chain stays responsive.
-            const ULONGLONG now = GetTickCount64();
-            if (m_scrubLastSeekTick == 0 ||
-                now - m_scrubLastSeekTick >= kScrubSeekIntervalMs) {
-                auto pc = playback_control::get();
-                const double length = pc->playback_get_length_ex();
-                if (pc->is_playing() && pc->playback_can_seek() && length > 0.0) {
-                    pc->playback_seek(m_scrubTargetPosition * length);
-                    m_scrubLastSeekTick = now;
+            if (!set_transport_scrub(m_scrubTargetPosition)) {
+                // Compatibility fallback for the pre-transport Stem Separator.
+                const ULONGLONG now = GetTickCount64();
+                if (m_scrubLastSeekTick == 0 ||
+                    now - m_scrubLastSeekTick >= kScrubSeekIntervalMs) {
+                    auto pc = playback_control::get();
+                    const double length = pc->playback_get_length_ex();
+                    if (pc->is_playing() && pc->playback_can_seek() && length > 0.0) {
+                        pc->playback_seek(m_scrubTargetPosition * length);
+                        m_scrubLastSeekTick = now;
+                    }
                 }
             }
             invalidate_all();
@@ -904,23 +1104,23 @@ private:
                 }
             }
 
-            if ((wasMoved || heldMs < kGrabClickThresholdMs) &&
-                pc->is_playing() && pc->playback_can_seek() && length > 0.0) {
-                pc->playback_seek(releaseTarget * length);
-            }
-
             m_touchHoldPosition = releaseTarget;
             m_touchHoldAnchorX = m_scrubAnchorX;
 
             if (m_touchHoldLatched) {
-                // H was armed: mouse-up drops capture, but the virtual platter
-                // stays stopped until H (or the context command) releases it.
+                // Mouse-up drops capture, but H leaves the virtual platter stopped.
+                if (!set_transport_hold(releaseTarget)) {
+                    if ((wasMoved || heldMs < kGrabClickThresholdMs) &&
+                        pc->is_playing() && pc->playback_can_seek() && length > 0.0) {
+                        pc->playback_seek(releaseTarget * length);
+                    }
+                }
                 invalidate_frame();
             } else {
-                // Start the visual handoff before unpausing so a synchronous seek
-                // callback cannot pull the view to an older reported position.
+                // One final seek only. For a selected stem, release_transport_to()
+                // pauses at this exact point if its PCM window is not ready yet.
                 if (m_followPlayhead) begin_release_glide(releaseTarget);
-                resume_touch_pause();
+                release_transport_to(releaseTarget);
             }
             return;
         }
@@ -1006,6 +1206,7 @@ private:
             else wsprintfW(label, L"%d.%dx", tenths / 10, tenths % 10);
         }
         if (m_touchHoldLatched) wcscat_s(label, L"  HOLD");
+        if (reverse_active()) wcscat_s(label, m_reverseLatched ? L"  REV LOCK" : L"  REV");
 
         SIZE textSize{};
         if (!GetTextExtentPoint32W(dc, label, lstrlenW(label), &textSize)) return;
@@ -1422,22 +1623,37 @@ private:
     }
 
     void on_playback_new_track(metadb_handle_ptr track) override {
+        auto transport = find_transport_service();
+        if (!transport.is_empty()) { try { transport->cancel_transport(); } catch (...) {} }
         m_touchHoldLatched = false;
         m_touchPauseOwned = false;
         m_centerScrubbing = false;
+        m_reverseKeyHeld = false;
+        m_reverseLatched = false;
+        m_reverseReturnToHold = false;
+        m_transportReleasePending = false;
+        m_releasePauseOwned = false;
         start_analysis(track);
     }
     void on_playback_stop(play_control::t_stop_reason) override {
+        auto transport = find_transport_service();
+        if (!transport.is_empty()) { try { transport->cancel_transport(); } catch (...) {} }
         m_touchHoldLatched = false;
         m_touchPauseOwned = false;
         m_centerScrubbing = false;
+        m_reverseKeyHeld = false;
+        m_reverseLatched = false;
+        m_reverseReturnToHold = false;
+        m_transportReleasePending = false;
+        m_releasePauseOwned = false;
         stop_analysis();
         invalidate_all(false);
     }
     void on_playback_seek(double) override {
         // Continuous seeks generated by a centered grab must not fight the user's
         // drag by recentering the view on every seek callback.
-        if (m_centerScrubbing || m_touchHoldLatched || m_releaseGlideActive) {
+        if (m_centerScrubbing || m_touchHoldLatched || reverse_active() ||
+            m_transportReleasePending || m_releaseGlideActive) {
             invalidate_playhead();
             return;
         }
@@ -1491,6 +1707,12 @@ private:
     bool m_touchPauseOwned = false;
     double m_touchHoldPosition = 0.0;
     double m_touchHoldAnchorX = 0.5;
+    bool m_reverseKeyHeld = false;
+    bool m_reverseLatched = false;
+    bool m_reverseReturnToHold = false;
+    bool m_transportReleasePending = false;
+    bool m_releasePauseOwned = false;
+    double m_transportReleaseTarget = 0.0;
     bool m_releaseGlideActive = false;
     ULONGLONG m_releaseGlideStartTick = 0;
     double m_releaseGlideStartView = 0.0;
