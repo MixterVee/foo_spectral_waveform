@@ -145,6 +145,15 @@ public:
         m_ready = false;
     }
 
+    void invalidate_current() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_activeAbort) m_activeAbort->abort();
+        ++m_generation;
+        m_hasRequest = false;
+        m_analysisActive = false;
+        m_ready = false;
+    }
+
 private:
     bool is_current(std::uint64_t generation) {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -282,6 +291,10 @@ public:
         if (g_manager) g_manager->request(m_track, m_lastMode, position);
     }
 
+    void force_mode_refresh() {
+        m_lastMode = -999;
+    }
+
 private:
     void on_playback_new_track(metadb_handle_ptr track) override {
         m_track = track;
@@ -389,6 +402,8 @@ bool aggregate(double start_seconds, double end_seconds, waveform_point& out) {
 }
 
 void reset() {
+    if (g_manager) g_manager->invalidate_current();
+    if (g_observer) g_observer->force_mode_refresh();
     clear_previews(true);
 }
 

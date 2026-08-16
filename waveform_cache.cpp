@@ -195,6 +195,26 @@ void save_cache_variant(
     }
 }
 
+void remove_cache_variant(
+    metadb_handle_ptr track,
+    int mode,
+    abort_callback& aborter) {
+
+    if (track.is_empty()) return;
+
+    try {
+        const auto path = cache_path_for_track(track, mode);
+        if (filesystem::g_exists(path, aborter)) {
+            filesystem::g_remove(path, aborter);
+        }
+    } catch (exception_aborted const&) {
+        throw;
+    } catch (exception_io const&) {
+        // Manual recovery is best-effort. A missing/unwritable cache must not
+        // interfere with playback or with the new analysis.
+    }
+}
+
 } // namespace
 
 bool load_waveform_cache(metadb_handle_ptr track, waveform_data& out, abort_callback& aborter) {
@@ -223,6 +243,12 @@ void save_stem_waveform_cache(
 
     if (mode != 1 && mode != 2) return;
     save_cache_variant(track, mode, data, aborter);
+}
+
+void remove_waveform_caches(metadb_handle_ptr track, abort_callback& aborter) {
+    remove_cache_variant(track, 0, aborter);
+    remove_cache_variant(track, 1, aborter);
+    remove_cache_variant(track, 2, aborter);
 }
 
 } // namespace spectral_waveform

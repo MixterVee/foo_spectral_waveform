@@ -24,4 +24,8 @@ void save_stem_waveform_cache(
     const waveform_data& data,
     abort_callback& aborter);
 
+// Removes Original, Vocals and Instrumental waveform caches for one track.
+// Missing/unwritable cache files are ignored; abort requests still propagate.
+void remove_waveform_caches(metadb_handle_ptr track, abort_callback& aborter);
+
 } // namespace spectral_waveform

@@ -38,6 +38,7 @@ enum : UINT {
     kMenuFollowPlayhead,
     kMenuFollowCentered,
     kMenuFollowPaged,
+    kMenuReanalyze,
 };
 
 enum class follow_mode {
@@ -396,6 +397,9 @@ private:
             kMenuFollowCentered, L"Follow Mode: Centered Scroll");
         AppendMenuW(menu, MF_STRING | (m_followMode == follow_mode::paged ? MF_CHECKED : 0),
             kMenuFollowPaged, L"Follow Mode: Page at Edge");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (m_currentTrack.is_empty() ? MF_GRAYED : 0),
+            kMenuReanalyze, L"Re-analyze Current Track");
 
         const UINT command = TrackPopupMenu(menu,
             TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
@@ -430,7 +434,26 @@ private:
             m_followMode = follow_mode::paged;
             if (m_followPlayhead) invalidate_frame();
             break;
+        case kMenuReanalyze:
+            reanalyze_current_track();
+            break;
         }
+    }
+
+    void reanalyze_current_track() {
+        const auto track = m_currentTrack;
+        if (track.is_empty()) return;
+
+        // Stop both generations before deleting files so stale background work
+        // cannot recreate an old cache after the recovery command runs.
+        stop_analysis();
+        spectral_waveform::live_output_capture::reset();
+
+        abort_callback_impl aborter;
+        spectral_waveform::remove_waveform_caches(track, aborter);
+
+        // Keep the user's zoom/pan while rebuilding the Original waveform now.
+        start_analysis(track, false);
     }
 
     void begin_drag(int x) {
@@ -764,10 +787,11 @@ private:
         m_waveform.reset();
     }
 
-    void start_analysis(metadb_handle_ptr track) {
+    void start_analysis(metadb_handle_ptr track, bool resetView = true) {
         stop_analysis();
+        m_currentTrack = track;
         clear_waveform();
-        reset_view();
+        if (resetView) reset_view();
         m_bufferValid = false;
         if (track.is_empty()) {
             invalidate_all();
@@ -893,6 +917,7 @@ private:
 
     mutable std::mutex m_waveformMutex;
     std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
+    metadb_handle_ptr m_currentTrack;
     std::thread m_worker;
     std::shared_ptr<abort_callback_impl> m_abort;
     std::atomic_bool m_analyzing{false};

@@ -13,7 +13,8 @@ bool point_at(double seconds, waveform_point& out);
 // Unprocessed areas fall back to the normal cached original waveform.
 bool aggregate(double start_seconds, double end_seconds, waveform_point& out);
 
-// Clears the active stem preview.
+// Clears the active previews and invalidates the current stem-analysis
+// generation so stale workers cannot recreate caches during manual recovery.
 void reset();
 
 } // namespace spectral_waveform::live_output_capture
