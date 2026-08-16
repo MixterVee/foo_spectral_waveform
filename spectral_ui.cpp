@@ -494,6 +494,14 @@ private:
         auto transport = find_transport_service();
         if (!transport.is_empty()) {
             const double seconds = positionFrac * length;
+
+            // Arm the visual/seek guard before playback_seek(). The seek callback
+            // can be delivered during the handoff; without this, centered follow
+            // briefly recenters from the normal playback clock and creates a
+            // large-looking hop when zoomed in.
+            m_transportReleaseTarget = positionFrac;
+            m_transportReleasePending = true;
+
             bool ready = true;
             const bool wasPaused = pc->is_paused();
             bool pauseOwned = false;
@@ -513,9 +521,9 @@ private:
                 ready = true;
             }
 
-            m_transportReleaseTarget = positionFrac;
-            m_transportReleasePending = !ready;
-
+            // Keep m_transportReleasePending armed even when the target is already
+            // ready. The next UI timer tick clears it after all seek callbacks from
+            // this handoff have had a chance to arrive.
             if (!ready) {
                 // Keep only our own pause until the selected rendition is ready.
                 m_releasePauseOwned = pauseOwned;
@@ -785,7 +793,8 @@ private:
     }
 
     bool update_follow_view() {
-        if ((m_touchHoldLatched && !reverse_active()) || m_releaseGlideActive || !m_followPlayhead ||
+        if ((m_touchHoldLatched && !reverse_active()) || m_releaseGlideActive ||
+            m_transportReleasePending || !m_followPlayhead ||
             m_viewSpan >= 0.9995 || m_dragging || m_wnd == nullptr) return false;
         auto pc = playback_control::get();
         if (!pc->is_playing() || pc->is_paused()) return false;
@@ -838,6 +847,13 @@ private:
         if (m_releaseGlideActive) {
             const double positionFrac = release_glide_position();
             if (positionFrac < 0.0 || positionFrac < m_viewStart || positionFrac > view_end()) return -1;
+            const double visibleFrac = (positionFrac - m_viewStart) / m_viewSpan;
+            return static_cast<int>(std::lround(visibleFrac * std::max(0, width - 1)));
+        }
+
+        if (m_transportReleasePending) {
+            const double positionFrac = std::clamp(m_transportReleaseTarget, 0.0, 1.0);
+            if (positionFrac < m_viewStart || positionFrac > view_end()) return -1;
             const double visibleFrac = (positionFrac - m_viewStart) / m_viewSpan;
             return static_cast<int>(std::lround(visibleFrac * std::max(0, width - 1)));
         }
