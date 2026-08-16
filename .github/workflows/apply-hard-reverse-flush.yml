@@ -1,0 +1,25 @@
+name: Apply hard reverse flush
+
+on:
+  push:
+    paths:
+      - '.github/hard_reverse_flush_patch.py'
+      - '.github/workflows/apply-hard-reverse-flush.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python .github/hard_reverse_flush_patch.py
+      - name: Commit source change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add spectral_ui.cpp
+          git commit -m "Use hard output flush for reverse start"
+          git push
