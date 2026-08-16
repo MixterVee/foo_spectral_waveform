@@ -495,7 +495,17 @@ private:
         if (!transport.is_empty()) {
             const double seconds = positionFrac * length;
             bool ready = true;
+            const bool wasPaused = pc->is_paused();
+            bool pauseOwned = false;
             try {
+                // Symmetric hard handoff with Reverse entry. Pause the output
+                // before changing transport/seek so queued reverse audio cannot
+                // drain for another output-buffer interval after release.
+                if (!wasPaused) {
+                    pc->pause(true);
+                    pauseOwned = true;
+                }
+
                 transport->release_transport(seconds);
                 pc->playback_seek(seconds);
                 ready = transport->is_position_ready(seconds);
@@ -505,9 +515,17 @@ private:
 
             m_transportReleaseTarget = positionFrac;
             m_transportReleasePending = !ready;
-            if (!ready && !pc->is_paused()) {
-                pc->pause(true);
-                m_releasePauseOwned = true;
+
+            if (!ready) {
+                // Keep only our own pause until the selected rendition is ready.
+                m_releasePauseOwned = pauseOwned;
+            } else {
+                // Original mode and already-cached stems resume immediately after
+                // the seek flush, instead of waiting for queued reverse audio.
+                if (pauseOwned && pc->is_playing() && pc->is_paused()) {
+                    pc->pause(false);
+                }
+                m_releasePauseOwned = false;
             }
             return true;
         }
