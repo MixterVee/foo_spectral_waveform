@@ -267,8 +267,8 @@ void save_transport_manifest_entries(
 
 float transport_pcm_scale(const float* data, std::size_t samples) {
     float peak = 0.0f;
-    for (std::size_t i = 0; i < samples; ++i) peak = std::max(peak, std::abs(data[i]));
-    return std::max(1.0f, peak);
+    for (std::size_t i = 0; i < samples; ++i) peak = (std::max)(peak, std::abs(data[i]));
+    return (std::max)(1.0f, peak);
 }
 
 void pack_transport_pcm24(
@@ -278,7 +278,7 @@ void pack_transport_pcm24(
     std::vector<std::uint8_t>& packed) {
 
     packed.resize(samples * 3);
-    const double denom = static_cast<double>(std::max(scale, 1.0e-20f));
+    const double denom = static_cast<double>((std::max)(scale, 1.0e-20f));
     for (std::size_t i = 0; i < samples; ++i) {
         const double normalized = std::clamp(static_cast<double>(input[i]) / denom, -1.0, 1.0);
         const std::int32_t q = static_cast<std::int32_t>(std::llround(normalized * 8388607.0));
@@ -575,7 +575,7 @@ bool rehydrate_transport_pcm_cache(
 
     std::vector<transport_manifest_entry> entries;
     if (!load_transport_manifest_entries(track, entries, aborter)) return false;
-    priority_seconds = std::max(0.0, priority_seconds);
+    priority_seconds = (std::max)(0.0, priority_seconds);
     std::stable_sort(entries.begin(), entries.end(),
         [priority_seconds](const transport_manifest_entry& a, const transport_manifest_entry& b) {
             const double da = std::abs(static_cast<double>(a.start_us) / 1000000.0 - priority_seconds);
@@ -594,7 +594,7 @@ bool rehydrate_transport_pcm_cache(
         unsigned sample_rate = 0;
         if (!load_transport_block(track, entry.start_us, start_seconds,
                 vocals, instrumental, frames, channels, sample_rate, aborter)) continue;
-        if (frames > static_cast<std::uint64_t>(std::numeric_limits<t_size>::max())) continue;
+        if (frames > static_cast<std::uint64_t>((std::numeric_limits<t_size>::max)())) continue;
         try {
             if (transport->publish_cache_block(
                     track->get_path(), start_seconds, nullptr,
