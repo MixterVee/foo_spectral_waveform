@@ -1,0 +1,25 @@
+name: Apply pure reverse clock patch
+
+on:
+  push:
+    paths:
+      - '.github/pure_reverse_clock_patch.py'
+      - '.github/workflows/apply-pure-reverse-clock.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python .github/pure_reverse_clock_patch.py
+      - name: Commit source change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add spectral_ui.cpp
+          git commit -m "Use pure wall-clock reverse display"
+          git push
