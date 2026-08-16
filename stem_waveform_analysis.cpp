@@ -26,6 +26,10 @@ namespace {
 
 constexpr double kStemBlockSeconds = 5.0;
 constexpr double kStemContextSeconds = 3.0;
+// Share an extra 1.5 seconds on each side of the visible 5-second target.
+// That leaves at least 1.5 seconds between transport PCM and the artificial
+// Spleeter context edge while giving adjacent transport tiles a 3-second overlap.
+constexpr double kTransportShareContextSeconds = 1.5;
 constexpr double kPriorityAheadSeconds = 20.0;
 
 stem_waveform_provider::ptr find_provider() {
@@ -137,7 +141,10 @@ bool analyze_stems_progressive(
         size_t frames,
         size_t trimStartFrames,
         size_t targetFrames,
-        double targetStartSeconds) -> bool {
+        double targetStartSeconds,
+        size_t transportStartFrames,
+        size_t transportFrames,
+        double transportStartSeconds) -> bool {
 
         if (pcm == nullptr || frames == 0 || targetFrames == 0 ||
             sampleRate == 0 || channels == 0) return true;
@@ -169,15 +176,27 @@ bool analyze_stems_progressive(
 
         const size_t trimSample = trimStartFrames * channels;
 
-        if (!transport.is_empty()) {
+        // The display still uses only the artifact-free center target, but the
+        // transport cache can safely reuse more of the already separated context.
+        // Adjacent 5-second targets therefore publish overlapping PCM without any
+        // additional Spleeter inference.
+        transportStartFrames = std::min(transportStartFrames, frames);
+        if (transportStartFrames < frames) {
+            transportFrames = std::min(transportFrames, frames - transportStartFrames);
+        } else {
+            transportFrames = 0;
+        }
+
+        if (!transport.is_empty() && transportFrames > 0) {
             try {
+                const size_t transportSample = transportStartFrames * channels;
                 transport->publish_cache_block(
                     track->get_path(),
-                    targetStartSeconds,
-                    pcm + trimSample,
-                    vocals.data() + trimSample,
-                    instrumental.data() + trimSample,
-                    static_cast<t_size>(targetFrames),
+                    transportStartSeconds,
+                    pcm + transportSample,
+                    vocals.data() + transportSample,
+                    instrumental.data() + transportSample,
+                    static_cast<t_size>(transportFrames),
                     channels,
                     sampleRate);
             } catch (...) {
@@ -269,8 +288,30 @@ bool analyze_stems_progressive(
         if (trimStartFrames >= decodedFrames) return false;
         targetFrames = std::min(targetFrames, decodedFrames - trimStartFrames);
 
+        const double transportStart = std::max(
+            contextStart, targetStart - kTransportShareContextSeconds);
+        const double transportEnd = std::min(
+            contextEnd, targetEnd + kTransportShareContextSeconds);
+
+        size_t transportStartFrames = static_cast<size_t>(std::max<double>(
+            0.0,
+            std::llround((transportStart - contextStart) * static_cast<double>(sampleRate))));
+        transportStartFrames = std::min(transportStartFrames, decodedFrames);
+
+        size_t transportFrames = 0;
+        if (transportStartFrames < decodedFrames && transportEnd > transportStart) {
+            transportFrames = static_cast<size_t>(std::max<double>(
+                1.0,
+                std::llround((transportEnd - transportStart) * static_cast<double>(sampleRate))));
+            transportFrames = std::min(transportFrames, decodedFrames - transportStartFrames);
+        }
+
+        const double actualTransportStart = contextStart +
+            static_cast<double>(transportStartFrames) / static_cast<double>(sampleRate);
+
         return separate_and_merge(
-            pcm.data(), decodedFrames, trimStartFrames, targetFrames, targetStart);
+            pcm.data(), decodedFrames, trimStartFrames, targetFrames, targetStart,
+            transportStartFrames, transportFrames, actualTransportStart);
     };
 
     auto process_context_range = [&](double rangeStart, double rangeEnd) -> bool {
@@ -315,7 +356,8 @@ bool analyze_stems_progressive(
 
             while (pending.size() / channels >= blockFrames) {
                 if (!separate_and_merge(
-                        pending.data(), blockFrames, 0, blockFrames, pendingStartSeconds)) return false;
+                        pending.data(), blockFrames, 0, blockFrames, pendingStartSeconds,
+                        0, blockFrames, pendingStartSeconds)) return false;
                 pending.erase(
                     pending.begin(),
                     pending.begin() + static_cast<std::ptrdiff_t>(blockFrames * channels));
@@ -327,7 +369,8 @@ bool analyze_stems_progressive(
         const size_t remainFrames = channels > 0 ? pending.size() / channels : 0;
         if (remainFrames > 0) {
             if (!separate_and_merge(
-                    pending.data(), remainFrames, 0, remainFrames, pendingStartSeconds)) return false;
+                    pending.data(), remainFrames, 0, remainFrames, pendingStartSeconds,
+                    0, remainFrames, pendingStartSeconds)) return false;
         }
         return true;
     };
