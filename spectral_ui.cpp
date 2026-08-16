@@ -69,8 +69,9 @@ std::wstring utf8_menu_text(const char* text) {
     if (text == nullptr || *text == 0) return {};
     const int count = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
     if (count <= 1) return {};
-    std::wstring out(static_cast<size_t>(count - 1), L'\0');
+    std::wstring out(static_cast<size_t>(count), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text, -1, out.data(), count);
+    out.resize(static_cast<size_t>(count - 1));
     return out;
 }
 
