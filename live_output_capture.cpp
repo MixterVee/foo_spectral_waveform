@@ -258,9 +258,11 @@ private:
                         load_stem_waveform_cache(track, 2, cachedInstrumental, *aborter);
 
                     if (haveVocals && haveInstrumental && is_current(generation)) {
-                        // Already-cached tracks stay instant. The visual dissolve is
-                        // reserved for newly completing progressive analysis blocks.
+                        // Already-cached tracks stay visually instant. Restore the
+                        // matching separated PCM in this same background worker so
+                        // scrub/reverse is restart-ready without another Spleeter pass.
                         publish_previews(cachedVocals, cachedInstrumental, false);
+                        rehydrate_transport_pcm_cache(track, prioritySeconds, *aborter);
                         completed = true;
                     } else {
                         waveform_data original;

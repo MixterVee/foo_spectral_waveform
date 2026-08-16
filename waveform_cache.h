@@ -24,8 +24,28 @@ void save_stem_waveform_cache(
     const waveform_data& data,
     abort_callback& aborter);
 
-// Removes Original, Vocals and Instrumental waveform caches for one track.
-// Missing/unwritable cache files are ignored; abort requests still propagate.
+// Persists the separated PCM used only for scrub/reverse transport. The on-disk
+// representation stores the two stems as scaled packed 24-bit samples so it is
+// much smaller than keeping three float streams while preserving ample fidelity.
+void save_transport_pcm_block(
+    metadb_handle_ptr track,
+    double start_seconds,
+    const float* vocals,
+    const float* instrumental,
+    t_size frames,
+    unsigned channels,
+    unsigned sample_rate,
+    abort_callback& aborter);
+
+// Re-publishes persistent transport blocks to the companion Stem Separator.
+// Blocks nearest priority_seconds are restored first.
+bool rehydrate_transport_pcm_cache(
+    metadb_handle_ptr track,
+    double priority_seconds,
+    abort_callback& aborter);
+
+// Removes Original, Vocals, Instrumental and persistent transport PCM caches
+// for one track. Missing/unwritable cache files are ignored.
 void remove_waveform_caches(metadb_handle_ptr track, abort_callback& aborter);
 
 } // namespace spectral_waveform

@@ -8,6 +8,7 @@
 #include "stem_waveform_analysis.h"
 #include "stem_waveform_provider.h"
 #include "stem_transport_service.h"
+#include "waveform_cache.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,6 +31,9 @@ constexpr double kStemContextSeconds = 3.0;
 // That leaves at least 1.5 seconds between transport PCM and the artificial
 // Spleeter context edge while giving adjacent transport tiles a 3-second overlap.
 constexpr double kTransportShareContextSeconds = 1.5;
+// Persistent transport PCM needs only enough overlap for seamless handoff and
+// the 350 ms transport readiness margin. Keep the much wider live sharing in RAM.
+constexpr double kPersistentTransportOverlapSeconds = 0.25;
 constexpr double kPriorityAheadSeconds = 20.0;
 
 stem_waveform_provider::ptr find_provider() {
@@ -187,13 +191,39 @@ bool analyze_stems_progressive(
             transportFrames = 0;
         }
 
+        // Persist the artifact-free target plus 250 ms on either side. This is
+        // enough for seamless restart-time transport handoff without writing the
+        // full 3-second Spleeter context window to disk.
+        const size_t persistentPadFrames = static_cast<size_t>(std::llround(
+            kPersistentTransportOverlapSeconds * static_cast<double>(sampleRate)));
+        const size_t persistentStartFrames = trimStartFrames > persistentPadFrames
+            ? trimStartFrames - persistentPadFrames
+            : 0;
+        const size_t targetEndFrames = std::min(frames, trimStartFrames + targetFrames);
+        const size_t persistentEndFrames = std::min(
+            frames, targetEndFrames + persistentPadFrames);
+        if (persistentEndFrames > persistentStartFrames) {
+            const size_t persistentFrames = persistentEndFrames - persistentStartFrames;
+            const double persistentStartSeconds = targetStartSeconds -
+                static_cast<double>(trimStartFrames - persistentStartFrames) /
+                    static_cast<double>(sampleRate);
+            const size_t persistentSample = persistentStartFrames * channels;
+            save_transport_pcm_block(
+                track, persistentStartSeconds,
+                vocals.data() + persistentSample,
+                instrumental.data() + persistentSample,
+                static_cast<t_size>(persistentFrames), channels, sampleRate, aborter);
+        }
+
         if (!transport.is_empty() && transportFrames > 0) {
             try {
                 const size_t transportSample = transportStartFrames * channels;
+                // Original can be decoded cheaply on demand. Share only the two
+                // expensive separated stems so the companion cache uses less RAM.
                 transport->publish_cache_block(
                     track->get_path(),
                     transportStartSeconds,
-                    pcm + transportSample,
+                    nullptr,
                     vocals.data() + transportSample,
                     instrumental.data() + transportSample,
                     static_cast<t_size>(transportFrames),
