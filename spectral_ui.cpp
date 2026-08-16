@@ -1785,7 +1785,6 @@ private:
         m_reverseReturnToHold = false;
         m_reverseVisualActive = false;
         m_reverseVisualLastTick = 0;
-        m_reverseVisualConfirmedTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
         start_analysis(track);
@@ -1802,7 +1801,6 @@ private:
         m_reverseReturnToHold = false;
         m_reverseVisualActive = false;
         m_reverseVisualLastTick = 0;
-        m_reverseVisualConfirmedTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
         stop_analysis();
