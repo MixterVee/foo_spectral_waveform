@@ -1,0 +1,317 @@
+name: Apply re-analysis patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-reanalysis-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Apply reanalysis patch workflow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply Re-analyze Current Track feature
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if text.count(old) != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {text.count(old)}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # waveform_cache.h: public delete-all API for one track.
+          replace_once(
+              'waveform_cache.h',
+              '''void save_stem_waveform_cache(
+              metadb_handle_ptr track,
+              int mode,
+              const waveform_data& data,
+              abort_callback& aborter);
+
+          } // namespace spectral_waveform
+          ''',
+              '''void save_stem_waveform_cache(
+              metadb_handle_ptr track,
+              int mode,
+              const waveform_data& data,
+              abort_callback& aborter);
+
+          // Removes Original, Vocals and Instrumental waveform caches for one track.
+          // Missing/unwritable cache files are ignored; abort requests still propagate.
+          void remove_waveform_caches(metadb_handle_ptr track, abort_callback& aborter);
+
+          } // namespace spectral_waveform
+          ''')
+
+          # waveform_cache.cpp: cache-file removal helper + public operation.
+          replace_once(
+              'waveform_cache.cpp',
+              '''    } catch (exception_io const&) {
+                  // Cache writes are opportunistic; playback/waveform display must not fail
+                  // just because the profile folder is temporarily unwritable.
+              }
+          }
+
+          } // namespace
+
+          bool load_waveform_cache''',
+              '''    } catch (exception_io const&) {
+                  // Cache writes are opportunistic; playback/waveform display must not fail
+                  // just because the profile folder is temporarily unwritable.
+              }
+          }
+
+          void remove_cache_variant(
+              metadb_handle_ptr track,
+              int mode,
+              abort_callback& aborter) {
+
+              if (track.is_empty()) return;
+
+              try {
+                  const auto path = cache_path_for_track(track, mode);
+                  if (filesystem::g_exists(path, aborter)) {
+                      filesystem::g_remove(path, aborter);
+                  }
+              } catch (exception_aborted const&) {
+                  throw;
+              } catch (exception_io const&) {
+                  // Manual recovery is best-effort. An unwritable/missing cache must
+                  // never interfere with playback or the fresh waveform analysis.
+              }
+          }
+
+          } // namespace
+
+          bool load_waveform_cache''')
+
+          replace_once(
+              'waveform_cache.cpp',
+              '''    if (mode != 1 && mode != 2) return;
+              save_cache_variant(track, mode, data, aborter);
+          }
+
+          } // namespace spectral_waveform
+          ''',
+              '''    if (mode != 1 && mode != 2) return;
+              save_cache_variant(track, mode, data, aborter);
+          }
+
+          void remove_waveform_caches(metadb_handle_ptr track, abort_callback& aborter) {
+              remove_cache_variant(track, 0, aborter);
+              remove_cache_variant(track, 1, aborter);
+              remove_cache_variant(track, 2, aborter);
+          }
+
+          } // namespace spectral_waveform
+          ''')
+
+          # live_output_capture.h: reset now means invalidate generated stem state too.
+          replace_once(
+              'live_output_capture.h',
+              '''// Clears the active stem preview.
+          void reset();
+          ''',
+              '''// Clears active stem previews and invalidates the current stem-analysis
+          // generation. Used by manual re-analysis so stale workers cannot repopulate
+          // caches after they have been deleted.
+          void reset();
+          ''')
+
+          # live_output_capture.cpp: invalidate current generation and make observer
+          # notice the current mode again after the manual rebuild returns to the event loop.
+          replace_once(
+              'live_output_capture.cpp',
+              '''    void cancel_keep_preview() {
+                  std::lock_guard<std::mutex> lock(m_mutex);
+                  if (m_activeAbort) m_activeAbort->abort();
+                  ++m_generation;
+                  m_hasRequest = false;
+                  m_analysisActive = false;
+                  m_ready = false;
+              }
+
+          private:
+          ''',
+              '''    void cancel_keep_preview() {
+                  std::lock_guard<std::mutex> lock(m_mutex);
+                  if (m_activeAbort) m_activeAbort->abort();
+                  ++m_generation;
+                  m_hasRequest = false;
+                  m_analysisActive = false;
+                  m_ready = false;
+              }
+
+              void invalidate_current() {
+                  std::lock_guard<std::mutex> lock(m_mutex);
+                  if (m_activeAbort) m_activeAbort->abort();
+                  ++m_generation;
+                  m_hasRequest = false;
+                  m_analysisActive = false;
+                  m_ready = false;
+              }
+
+          private:
+          ''')
+
+          replace_once(
+              'live_output_capture.cpp',
+              '''    void prime(metadb_handle_ptr track) {
+                  m_track = track;
+                  m_lastMode = current_stem_mode();
+                  const double position = std::max(0.0, playback_control::get()->playback_get_position());
+                  if (g_manager) g_manager->request(m_track, m_lastMode, position);
+              }
+
+          private:
+          ''',
+              '''    void prime(metadb_handle_ptr track) {
+                  m_track = track;
+                  m_lastMode = current_stem_mode();
+                  const double position = std::max(0.0, playback_control::get()->playback_get_position());
+                  if (g_manager) g_manager->request(m_track, m_lastMode, position);
+              }
+
+              void force_mode_refresh() {
+                  m_lastMode = -999;
+              }
+
+          private:
+          ''')
+
+          replace_once(
+              'live_output_capture.cpp',
+              '''void reset() {
+              clear_previews(true);
+          }
+          ''',
+              '''void reset() {
+              if (g_manager) g_manager->invalidate_current();
+              if (g_observer) g_observer->force_mode_refresh();
+              clear_previews(true);
+          }
+          ''')
+
+          # spectral_ui.cpp: context command + current-track retention + forced fresh source analysis.
+          replace_once(
+              'spectral_ui.cpp',
+              '''    kMenuFollowPlayhead,
+              kMenuFollowCentered,
+              kMenuFollowPaged,
+          };
+          ''',
+              '''    kMenuFollowPlayhead,
+              kMenuFollowCentered,
+              kMenuFollowPaged,
+              kMenuReanalyze,
+          };
+          ''')
+
+          replace_once(
+              'spectral_ui.cpp',
+              '''        AppendMenuW(menu, MF_STRING | (m_followMode == follow_mode::paged ? MF_CHECKED : 0),
+                  kMenuFollowPaged, L"Follow Mode: Page at Edge");
+
+              const UINT command = TrackPopupMenu(menu,
+          ''',
+              '''        AppendMenuW(menu, MF_STRING | (m_followMode == follow_mode::paged ? MF_CHECKED : 0),
+                  kMenuFollowPaged, L"Follow Mode: Page at Edge");
+              AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+              AppendMenuW(menu, MF_STRING | (m_currentTrack.is_empty() ? MF_GRAYED : 0),
+                  kMenuReanalyze, L"Re-analyze Current Track");
+
+              const UINT command = TrackPopupMenu(menu,
+          ''')
+
+          replace_once(
+              'spectral_ui.cpp',
+              '''        case kMenuFollowPaged:
+                  m_followMode = follow_mode::paged;
+                  if (m_followPlayhead) invalidate_frame();
+                  break;
+              }
+          }
+
+              void begin_drag(int x) {
+          ''',
+              '''        case kMenuFollowPaged:
+                  m_followMode = follow_mode::paged;
+                  if (m_followPlayhead) invalidate_frame();
+                  break;
+              case kMenuReanalyze:
+                  reanalyze_current_track();
+                  break;
+              }
+          }
+
+              void reanalyze_current_track() {
+                  const auto track = m_currentTrack;
+                  if (track.is_empty()) return;
+
+                  // Stop source/stem workers before deleting any files so a stale
+                  // generation cannot write an old cache back after removal.
+                  stop_analysis();
+                  spectral_waveform::live_output_capture::reset();
+
+                  abort_callback_impl aborter;
+                  spectral_waveform::remove_waveform_caches(track, aborter);
+
+                  // Preserve the user's current zoom/pan while rebuilding Original.
+                  start_analysis(track, false);
+              }
+
+              void begin_drag(int x) {
+          ''')
+
+          replace_once(
+              'spectral_ui.cpp',
+              '''    void start_analysis(metadb_handle_ptr track) {
+                  stop_analysis();
+                  clear_waveform();
+                  reset_view();
+                  m_bufferValid = false;
+          ''',
+              '''    void start_analysis(metadb_handle_ptr track, bool resetView = true) {
+                  stop_analysis();
+                  m_currentTrack = track;
+                  clear_waveform();
+                  if (resetView) reset_view();
+                  m_bufferValid = false;
+          ''')
+
+          replace_once(
+              'spectral_ui.cpp',
+              '''    mutable std::mutex m_waveformMutex;
+              std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
+              std::thread m_worker;
+          ''',
+              '''    mutable std::mutex m_waveformMutex;
+              std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
+              metadb_handle_ptr m_currentTrack;
+              std::thread m_worker;
+          ''')
+
+          print('Re-analysis patch applied successfully.')
+          PY
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add waveform_cache.h waveform_cache.cpp live_output_capture.h live_output_capture.cpp spectral_ui.cpp
+          git diff --cached --check
+          git commit -m "Add Re-analyze Current Track recovery"
+          git push origin HEAD:main
