@@ -12,6 +12,7 @@ namespace spectral_waveform {
 namespace {
 
 static constexpr std::uint32_t kCacheVersion = 1;
+static constexpr std::uint32_t kStemCacheRevision = 2;
 static constexpr std::array<char, 8> kMagic{{'F','S','W','A','V','E','0','1'}};
 static constexpr std::uint64_t kMaxPointCount = 20'000'000ULL;
 
@@ -55,9 +56,20 @@ std::uint64_t track_hash(metadb_handle_ptr track) {
     return hash;
 }
 
+std::uint64_t cache_hash_for_track(metadb_handle_ptr track, int mode) {
+    auto hash = track_hash(track);
+    if (mode == 1 || mode == 2) {
+        // Stem waveform revision is independent of the Original waveform cache.
+        // Bump this whenever stem-generation semantics change so old stem-only
+        // graphics are not silently reused while Original remains cached.
+        hash = fnv1a64(&kStemCacheRevision, sizeof(kStemCacheRevision), hash);
+    }
+    return hash;
+}
+
 pfc::string8 cache_path_for_track(metadb_handle_ptr track, int mode) {
     char name[112]{};
-    const auto hash = track_hash(track);
+    const auto hash = cache_hash_for_track(track, mode);
 
     if (mode == 1) {
         std::snprintf(name, sizeof(name), "foo_spectral_waveform-cache-vocals-%016llx.bin",
