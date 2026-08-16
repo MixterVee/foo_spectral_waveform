@@ -84,6 +84,7 @@ enum : UINT {
     kMenuFollowPlayhead,
     kMenuFollowCentered,
     kMenuFollowPaged,
+    kMenuHoldPlayback,
     kMenuShowTimeMarkers,
     kMenuReanalyze,
 };
@@ -208,6 +209,9 @@ private:
                     recenter_on_playhead();
                 }
                 return 0;
+            case 'H':
+                toggle_touch_hold();
+                return 0;
             case VK_UP:
                 zoom_from_keyboard(true);
                 return 0;
@@ -232,11 +236,20 @@ private:
         case WM_LBUTTONUP:
             end_drag(GET_X_LPARAM(lp));
             return 0;
-        case WM_CAPTURECHANGED:
+        case WM_CAPTURECHANGED: {
+            const bool lostCenteredGrab = m_centerScrubbing;
             m_dragging = false;
             m_dragMoved = false;
             m_centerScrubbing = false;
+            // If capture is lost unexpectedly (Alt-Tab, another popup, etc.),
+            // never leave a momentary platter touch holding playback paused.
+            if (lostCenteredGrab && !m_touchHoldLatched) {
+                const double target = m_scrubTargetPosition;
+                if (m_followPlayhead) begin_release_glide(target);
+                resume_touch_pause();
+            }
             return 0;
+        }
         case WM_LBUTTONDBLCLK:
             seek_from_x(GET_X_LPARAM(lp));
             return 0;
@@ -258,6 +271,7 @@ private:
     }
 
     void reset_view() {
+        if (m_touchHoldLatched && !m_dragging) release_touch_hold();
         m_releaseGlideActive = false;
         m_viewStart = 0.0;
         m_viewSpan = 1.0;
@@ -278,6 +292,76 @@ private:
         if (length <= 0.0) return false;
         out = std::clamp(pc->playback_get_position() / length, 0.0, 1.0);
         return true;
+    }
+
+    bool touch_hold_can_start() const {
+        auto pc = playback_control::get();
+        return m_followPlayhead &&
+            m_followMode == follow_mode::centered &&
+            m_viewSpan < 0.9995 &&
+            pc->is_playing() &&
+            pc->playback_can_seek();
+    }
+
+    void pause_for_touch() {
+        auto pc = playback_control::get();
+        if (!pc->is_playing()) return;
+        if (!pc->is_paused()) {
+            // Remember ownership so we only unpause playback that *we* paused.
+            m_touchPauseOwned = true;
+            pc->pause(true);
+        }
+    }
+
+    void resume_touch_pause() {
+        auto pc = playback_control::get();
+        if (m_touchPauseOwned && pc->is_playing() && pc->is_paused()) {
+            pc->pause(false);
+        }
+        m_touchPauseOwned = false;
+    }
+
+    void release_touch_hold() {
+        if (!m_touchHoldLatched) return;
+        const double target = m_touchHoldPosition;
+        m_touchHoldLatched = false;
+        if (m_followPlayhead && m_followMode == follow_mode::centered) {
+            begin_release_glide(target);
+        }
+        resume_touch_pause();
+        invalidate_frame();
+    }
+
+    void toggle_touch_hold() {
+        // While the mouse is physically down, H only arms/disarms the latch.
+        // The platter remains paused until mouse-up either way.
+        if (m_centerScrubbing) {
+            m_touchHoldLatched = !m_touchHoldLatched;
+            if (m_touchHoldLatched) {
+                m_touchHoldPosition = m_scrubTargetPosition;
+                m_touchHoldAnchorX = m_scrubAnchorX;
+                pause_for_touch();
+            }
+            invalidate_frame();
+            return;
+        }
+
+        if (m_touchHoldLatched) {
+            release_touch_hold();
+            return;
+        }
+
+        if (!touch_hold_can_start()) return;
+        double positionFrac = 0.0;
+        if (!playback_fraction(positionFrac)) return;
+
+        m_releaseGlideActive = false;
+        m_touchHoldLatched = true;
+        m_touchHoldPosition = positionFrac;
+        m_touchHoldAnchorX = std::clamp(
+            (positionFrac - m_viewStart) / m_viewSpan, 0.0, 1.0);
+        pause_for_touch();
+        invalidate_frame();
     }
 
     void center_on_playhead_once() {
@@ -315,7 +399,7 @@ private:
         if (length <= 0.0) return m_releaseGlideTargetPosition;
 
         const ULONGLONG elapsedMs = GetTickCount64() - m_releaseGlideStartTick;
-        const double advance = pc->is_playing()
+        const double advance = (pc->is_playing() && !pc->is_paused())
             ? (static_cast<double>(elapsedMs) / 1000.0) / length
             : 0.0;
         return std::clamp(m_releaseGlideTargetPosition + advance, 0.0, 1.0);
@@ -359,9 +443,10 @@ private:
     }
 
     bool update_follow_view() {
-        if (m_releaseGlideActive || !m_followPlayhead || m_viewSpan >= 0.9995 ||
-            m_dragging || m_wnd == nullptr) return false;
-        if (!playback_control::get()->is_playing()) return false;
+        if (m_touchHoldLatched || m_releaseGlideActive || !m_followPlayhead ||
+            m_viewSpan >= 0.9995 || m_dragging || m_wnd == nullptr) return false;
+        auto pc = playback_control::get();
+        if (!pc->is_playing() || pc->is_paused()) return false;
         double positionFrac = 0.0;
         if (!playback_fraction(positionFrac)) return false;
 
@@ -400,6 +485,11 @@ private:
         // let intermediate playback_seek callbacks make the blue line jump.
         if (m_centerScrubbing) {
             const double anchor = std::clamp(m_scrubAnchorX, 0.0, 1.0);
+            return static_cast<int>(std::lround(anchor * std::max(0, width - 1)));
+        }
+
+        if (m_touchHoldLatched) {
+            const double anchor = std::clamp(m_touchHoldAnchorX, 0.0, 1.0);
             return static_cast<int>(std::lround(anchor * std::max(0, width - 1)));
         }
 
@@ -577,6 +667,14 @@ private:
         AppendMenuW(menu, MF_STRING | (m_followMode == follow_mode::paged ? MF_CHECKED : 0),
             kMenuFollowPaged, L"Follow Mode: Page at Edge");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        {
+            const bool canHold = m_touchHoldLatched || touch_hold_can_start();
+            AppendMenuW(menu, MF_STRING | (canHold ? 0 : MF_GRAYED) |
+                (m_touchHoldLatched ? MF_CHECKED : 0),
+                kMenuHoldPlayback,
+                m_touchHoldLatched ? L"Release Playback\tH" : L"Hold Playback\tH");
+        }
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (g_showTimeMarkers.get() ? MF_CHECKED : 0),
             kMenuShowTimeMarkers, L"Show Time Markers");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -652,8 +750,12 @@ private:
             else invalidate_frame();
             break;
         case kMenuFollowPaged:
+            if (m_touchHoldLatched) release_touch_hold();
             m_followMode = follow_mode::paged;
             if (m_followPlayhead) invalidate_frame();
+            break;
+        case kMenuHoldPlayback:
+            toggle_touch_hold();
             break;
         case kMenuShowTimeMarkers:
             g_showTimeMarkers = !g_showTimeMarkers.get();
@@ -708,6 +810,13 @@ private:
             m_scrubTargetPosition = positionFrac;
             m_scrubAnchorX = std::clamp(
                 (positionFrac - m_viewStart) / m_viewSpan, 0.0, 1.0);
+            m_touchHoldPosition = positionFrac;
+            m_touchHoldAnchorX = m_scrubAnchorX;
+
+            // DJ-platter semantics: touching the centered waveform stops the
+            // music immediately. Seeking while held changes the queued position;
+            // playback only resumes when the touch is released (unless latched).
+            pause_for_touch();
         }
 
         SetCapture(m_wnd);
@@ -734,6 +843,10 @@ private:
                 (static_cast<double>(dx) / static_cast<double>(width - 1)) * m_viewSpan;
             m_scrubTargetPosition = std::clamp(
                 m_scrubStartPosition - deltaFrac, 0.0, 1.0);
+            if (m_touchHoldLatched) {
+                m_touchHoldPosition = m_scrubTargetPosition;
+                m_touchHoldAnchorX = m_scrubAnchorX;
+            }
 
             m_viewStart = m_scrubTargetPosition - m_scrubAnchorX * m_viewSpan;
             clamp_view();
@@ -773,23 +886,41 @@ private:
         if (GetCapture() == m_wnd) ReleaseCapture();
 
         if (centeredScrub) {
-            if (wasMoved) {
-                auto pc = playback_control::get();
-                const double length = pc->playback_get_length_ex();
-                if (pc->is_playing() && pc->playback_can_seek() && length > 0.0) {
-                    pc->playback_seek(m_scrubTargetPosition * length);
+            auto pc = playback_control::get();
+            const double length = pc->playback_get_length_ex();
+            double releaseTarget = m_scrubTargetPosition;
+
+            if (!wasMoved && heldMs < kGrabClickThresholdMs) {
+                // Keep quick click-to-seek, but perform it while the platter is
+                // still paused so no transient audio leaks before mouse-up.
+                RECT rc{};
+                GetClientRect(m_wnd, &rc);
+                const int width = rc.right - rc.left;
+                if (width > 1) {
+                    const double clickX = std::clamp(
+                        static_cast<double>(x) / static_cast<double>(width - 1), 0.0, 1.0);
+                    releaseTarget = std::clamp(
+                        m_viewStart + clickX * m_viewSpan, 0.0, 1.0);
                 }
-                // Do not immediately query playback_get_position() here. Right
-                // after a seek it can briefly report the preceding audition
-                // position, which caused the visible release snap. Use the exact
-                // scrub target for a short visual handoff, then resume follow.
-                if (m_followPlayhead) begin_release_glide(m_scrubTargetPosition);
-            } else if (heldMs < kGrabClickThresholdMs) {
-                // Preserve the existing quick click-to-seek action. A longer hold
-                // with no movement simply freezes centered scrolling temporarily.
-                seek_from_x(x);
-            } else if (m_followPlayhead) {
-                recenter_on_playhead();
+            }
+
+            if ((wasMoved || heldMs < kGrabClickThresholdMs) &&
+                pc->is_playing() && pc->playback_can_seek() && length > 0.0) {
+                pc->playback_seek(releaseTarget * length);
+            }
+
+            m_touchHoldPosition = releaseTarget;
+            m_touchHoldAnchorX = m_scrubAnchorX;
+
+            if (m_touchHoldLatched) {
+                // H was armed: mouse-up drops capture, but the virtual platter
+                // stays stopped until H (or the context command) releases it.
+                invalidate_frame();
+            } else {
+                // Start the visual handoff before unpausing so a synchronous seek
+                // callback cannot pull the view to an older reported position.
+                if (m_followPlayhead) begin_release_glide(releaseTarget);
+                resume_touch_pause();
             }
             return;
         }
@@ -874,6 +1005,7 @@ private:
             if (m_followPlayhead) wsprintfW(label, L"%d.%dx  Follow", tenths / 10, tenths % 10);
             else wsprintfW(label, L"%d.%dx", tenths / 10, tenths % 10);
         }
+        if (m_touchHoldLatched) wcscat_s(label, L"  HOLD");
 
         SIZE textSize{};
         if (!GetTextExtentPoint32W(dc, label, lstrlenW(label), &textSize)) return;
@@ -1289,22 +1421,38 @@ private:
         invalidate_all();
     }
 
-    void on_playback_new_track(metadb_handle_ptr track) override { start_analysis(track); }
+    void on_playback_new_track(metadb_handle_ptr track) override {
+        m_touchHoldLatched = false;
+        m_touchPauseOwned = false;
+        m_centerScrubbing = false;
+        start_analysis(track);
+    }
     void on_playback_stop(play_control::t_stop_reason) override {
+        m_touchHoldLatched = false;
+        m_touchPauseOwned = false;
+        m_centerScrubbing = false;
         stop_analysis();
         invalidate_all(false);
     }
     void on_playback_seek(double) override {
         // Continuous seeks generated by a centered grab must not fight the user's
         // drag by recentering the view on every seek callback.
-        if (m_centerScrubbing || m_releaseGlideActive) {
+        if (m_centerScrubbing || m_touchHoldLatched || m_releaseGlideActive) {
             invalidate_playhead();
             return;
         }
         if (m_followPlayhead) recenter_on_playhead();
         else invalidate_playhead();
     }
-    void on_playback_pause(bool) override { invalidate_playhead(); }
+    void on_playback_pause(bool paused) override {
+        // If playback is resumed elsewhere while a latched hold is idle, treat
+        // that external resume as an explicit release and keep the UI truthful.
+        if (!paused && m_touchHoldLatched && !m_centerScrubbing) {
+            m_touchHoldLatched = false;
+            m_touchPauseOwned = false;
+        }
+        invalidate_frame();
+    }
     void on_playback_time(double) override {
         if (!m_followPlayhead) invalidate_playhead();
     }
@@ -1339,6 +1487,10 @@ private:
     double m_scrubStartPosition = 0.0;
     double m_scrubTargetPosition = 0.0;
     double m_scrubAnchorX = 0.5;
+    bool m_touchHoldLatched = false;
+    bool m_touchPauseOwned = false;
+    double m_touchHoldPosition = 0.0;
+    double m_touchHoldAnchorX = 0.5;
     bool m_releaseGlideActive = false;
     ULONGLONG m_releaseGlideStartTick = 0;
     double m_releaseGlideStartView = 0.0;
