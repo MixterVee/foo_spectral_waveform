@@ -443,7 +443,7 @@ private:
             if (m_followPlayhead) invalidate_frame();
             break;
         case kMenuShowTimeMarkers:
-            g_showTimeMarkers.set(!g_showTimeMarkers.get());
+            g_showTimeMarkers = !g_showTimeMarkers.get();
             invalidate_frame();
             break;
         case kMenuReanalyze:
