@@ -1,0 +1,26 @@
+name: Apply scrub and stem menu polish
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-scrub-stem-menu.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply source patch
+        run: python .github/scrub_stem_menu_patch.py
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add spectral_ui.cpp live_output_capture.cpp live_output_capture.h
+          git commit -m "Polish centered scrub and add Stem Separator waveform menu"
+          git push
