@@ -48,7 +48,7 @@ static constexpr ULONGLONG kScrubSeekIntervalMs = 250;
 // Keep audible jog alive briefly after the most recent real mouse movement.
 // The timer explicitly returns transport to HOLD after this quiet period, so
 // slow drags do not fall through a fixed audio timeout while the hand is moving.
-static constexpr ULONGLONG kScrubMotionTailMs = 220;
+static constexpr ULONGLONG kScrubMotionTailMs = 40;
 static constexpr ULONGLONG kGrabClickThresholdMs = 350;
 static constexpr ULONGLONG kReleaseGlideDurationMs = 260;
 // Reverse audio position arrives in DSP-sized steps. Interpolate the display at
@@ -386,7 +386,21 @@ private:
         auto transport = find_transport_service();
         if (length <= 0.0 || transport.is_empty()) return false;
         try {
-            transport->set_hold(std::clamp(positionFrac, 0.0, 1.0) * length);
+            const double seconds =
+                std::clamp(positionFrac, 0.0, 1.0) * length;
+
+            // Arm HOLD before flushing foobar's playback pipeline. Any freshly
+            // decoded audio after the seek is therefore silence immediately.
+            // This avoids waiting for already-rendered scrub/playback samples to
+            // drain through the output buffer after H or after the hand stops.
+            transport->set_hold(seconds);
+
+            if (pc->is_playing() &&
+                !pc->is_paused() &&
+                pc->playback_can_seek()) {
+                pc->playback_seek(seconds);
+            }
+
             return true;
         } catch (...) {
             return false;
