@@ -588,13 +588,22 @@ private:
         m_reverseKeyHeld = !latched;
         m_reverseVisualActive = true;
         m_reverseVisualPosition = positionFrac;
-        m_reverseVisualLastTick = GetTickCount64();
+        m_reverseVisualLastTick = 0;
         m_releaseGlideActive = false;
 
-        if (pc->is_playing() && !pc->is_paused() && pc->playback_can_seek()) {
+        // Hard reverse handoff: prevent any already-queued forward audio from
+        // reaching the output while the seek flush is being processed. Reverse
+        // is armed first, then playback is paused only for the flush itself.
+        if (pc->is_playing() && pc->playback_can_seek()) {
+            const bool wasPaused = pc->is_paused();
+            if (!wasPaused) pc->pause(true);
             pc->playback_seek(seconds);
+            if (!wasPaused) pc->pause(false);
         }
 
+        // Start the visual reverse clock only after the output handoff is done,
+        // so the display cannot run ahead during the pause/flush/unpause cycle.
+        m_reverseVisualLastTick = GetTickCount64();
         invalidate_frame();
     }
 
