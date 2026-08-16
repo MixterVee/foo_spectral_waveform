@@ -51,6 +51,11 @@ static constexpr ULONGLONG kScrubSeekIntervalMs = 250;
 static constexpr ULONGLONG kScrubMotionTailMs = 220;
 static constexpr ULONGLONG kGrabClickThresholdMs = 350;
 static constexpr ULONGLONG kReleaseGlideDurationMs = 260;
+// Reverse audio position arrives in DSP-sized steps. Interpolate the display at
+// the UI timer rate, but never run far ahead of confirmed transport progress.
+static constexpr double kReverseVisualLeadSeconds = 0.140;
+static constexpr double kReverseVisualCatchupSeconds = 0.060;
+static constexpr double kReverseVisualMaxLagSeconds = 0.180;
 static constexpr UINT kMenuStemBase = 1000;
 
 enum stem_menu_command : unsigned {
@@ -197,6 +202,7 @@ private:
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
         case WM_TIMER: {
+            update_reverse_visual_clock();
             update_scrub_motion_gate();
             update_transport_release_wait();
             bool viewChanged = update_release_glide();
@@ -329,21 +335,36 @@ private:
         if (m_viewSpan > 0.9995) reset_view();
     }
 
-    bool playback_fraction(double& out) const {
+    bool authoritative_transport_fraction(double& out) const {
         auto pc = playback_control::get();
         const double length = pc->playback_get_length_ex();
         if (length <= 0.0) return false;
 
         auto transport = find_transport_service();
-        if (!transport.is_empty()) {
-            try {
-                if (transport->get_state() != stem_transport_normal) {
-                    out = std::clamp(
-                        transport->get_position_seconds() / length, 0.0, 1.0);
-                    return true;
-                }
-            } catch (...) {}
+        if (transport.is_empty()) return false;
+        try {
+            if (transport->get_state() == stem_transport_normal) return false;
+            out = std::clamp(
+                transport->get_position_seconds() / length, 0.0, 1.0);
+            return true;
+        } catch (...) {
+            return false;
         }
+    }
+
+    bool playback_fraction(double& out) const {
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        if (length <= 0.0) return false;
+
+        // The waveform follows a timer-rate reverse clock rather than the
+        // DSP-sized position steps. Audio remains authoritative underneath.
+        if (reverse_active() && m_reverseVisualActive) {
+            out = std::clamp(m_reverseVisualPosition, 0.0, 1.0);
+            return true;
+        }
+
+        if (authoritative_transport_fraction(out)) return true;
 
         out = std::clamp(pc->playback_get_position() / length, 0.0, 1.0);
         return true;
@@ -489,6 +510,86 @@ private:
         return m_reverseKeyHeld || m_reverseLatched;
     }
 
+    void update_reverse_visual_clock() {
+        if (!reverse_active() || !m_reverseVisualActive) {
+            m_reverseVisualActive = false;
+            return;
+        }
+
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        auto transport = find_transport_service();
+        if (length <= 0.0 || transport.is_empty()) {
+            m_reverseVisualActive = false;
+            return;
+        }
+
+        double confirmed = 0.0;
+        try {
+            if (transport->get_state() != stem_transport_reverse) {
+                m_reverseVisualActive = false;
+                return;
+            }
+            confirmed = std::clamp(
+                transport->get_position_seconds() / length, 0.0, 1.0);
+        } catch (...) {
+            m_reverseVisualActive = false;
+            return;
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        if (m_reverseVisualLastTick == 0) m_reverseVisualLastTick = now;
+        if (m_reverseVisualConfirmedTick == 0) m_reverseVisualConfirmedTick = now;
+
+        // Cap a delayed UI timer so a busy frame cannot create a large visual jump.
+        const double dt = std::min(
+            0.050, static_cast<double>(now - m_reverseVisualLastTick) / 1000.0);
+        m_reverseVisualLastTick = now;
+
+        const double progressEpsilon = 0.001 / length;
+        if (confirmed < m_reverseVisualConfirmedPosition - progressEpsilon) {
+            // Fresh reverse audio progress. Reset the extrapolation age at this
+            // authoritative point; under normal callback cadence this is nearly
+            // continuous with the timer-derived position already on screen.
+            m_reverseVisualConfirmedPosition = confirmed;
+            m_reverseVisualConfirmedTick = now;
+        } else if (confirmed > m_reverseVisualConfirmedPosition + 0.050 / length) {
+            // Unexpected forward discontinuity (external transport change). Keep
+            // the clock bounded to the new authority rather than drifting away.
+            m_reverseVisualConfirmedPosition = confirmed;
+            m_reverseVisualConfirmedTick = now;
+        }
+
+        const double confirmedAge = std::min(
+            kReverseVisualLeadSeconds,
+            static_cast<double>(now - m_reverseVisualConfirmedTick) / 1000.0);
+        const double target = std::clamp(
+            m_reverseVisualConfirmedPosition - confirmedAge / length, 0.0, 1.0);
+
+        // Advance at 1x every UI frame. If a newly confirmed DSP position is a
+        // little farther back, ease toward it instead of snapping the waveform.
+        double visual = std::clamp(
+            m_reverseVisualPosition - dt / length, 0.0, 1.0);
+        if (target < visual && dt > 0.0) {
+            const double alpha = 1.0 - std::exp(-dt / kReverseVisualCatchupSeconds);
+            visual += (target - visual) * alpha;
+        }
+
+        // Never display audio earlier than the bounded extrapolated target. Once
+        // confirmed progress is stale for 140 ms, this clamp freezes the waveform.
+        visual = std::max(visual, target);
+
+        // Conversely, do not let a coarse authoritative jump leave the graphic
+        // hundreds of milliseconds behind the audio while it catches up.
+        visual = std::min(
+            visual, target + kReverseVisualMaxLagSeconds / length);
+
+        // Reverse motion is monotonic. Small transport jitter must not make the
+        // waveform briefly move forward.
+        visual = std::min(visual, m_reverseVisualPosition);
+        m_reverseVisualPosition = std::clamp(visual, 0.0, 1.0);
+    }
+
     void begin_reverse_transport(bool latched) {
         if (m_transportReleasePending || !touch_hold_can_start()) return;
         double positionFrac = 0.0;
@@ -508,6 +609,11 @@ private:
         m_reverseReturnToHold = m_touchHoldLatched;
         m_reverseLatched = latched;
         m_reverseKeyHeld = !latched;
+        m_reverseVisualActive = true;
+        m_reverseVisualPosition = positionFrac;
+        m_reverseVisualConfirmedPosition = positionFrac;
+        m_reverseVisualLastTick = GetTickCount64();
+        m_reverseVisualConfirmedTick = m_reverseVisualLastTick;
         m_releaseGlideActive = false;
         invalidate_frame();
     }
@@ -515,12 +621,16 @@ private:
     void end_reverse_transport() {
         if (!reverse_active()) return;
         double positionFrac = 0.0;
-        if (!playback_fraction(positionFrac)) positionFrac = m_touchHoldPosition;
+        if (!authoritative_transport_fraction(positionFrac) &&
+            !playback_fraction(positionFrac)) {
+            positionFrac = m_touchHoldPosition;
+        }
 
         const bool returnToHold = m_touchHoldLatched || m_reverseReturnToHold;
         m_reverseKeyHeld = false;
         m_reverseLatched = false;
         m_reverseReturnToHold = false;
+        m_reverseVisualActive = false;
 
         if (returnToHold) {
             m_touchHoldPosition = positionFrac;
@@ -1022,6 +1132,7 @@ private:
                 m_reverseKeyHeld = false;
                 m_reverseLatched = false;
                 m_reverseReturnToHold = false;
+                m_reverseVisualActive = false;
                 set_transport_hold(reversePos);
             }
         }
@@ -1685,6 +1796,9 @@ private:
         m_reverseKeyHeld = false;
         m_reverseLatched = false;
         m_reverseReturnToHold = false;
+        m_reverseVisualActive = false;
+        m_reverseVisualLastTick = 0;
+        m_reverseVisualConfirmedTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
         start_analysis(track);
@@ -1699,6 +1813,9 @@ private:
         m_reverseKeyHeld = false;
         m_reverseLatched = false;
         m_reverseReturnToHold = false;
+        m_reverseVisualActive = false;
+        m_reverseVisualLastTick = 0;
+        m_reverseVisualConfirmedTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
         stop_analysis();
@@ -1768,6 +1885,11 @@ private:
     bool m_reverseKeyHeld = false;
     bool m_reverseLatched = false;
     bool m_reverseReturnToHold = false;
+    bool m_reverseVisualActive = false;
+    ULONGLONG m_reverseVisualLastTick = 0;
+    ULONGLONG m_reverseVisualConfirmedTick = 0;
+    double m_reverseVisualPosition = 0.0;
+    double m_reverseVisualConfirmedPosition = 0.0;
     bool m_transportReleasePending = false;
     bool m_releasePauseOwned = false;
     double m_transportReleaseTarget = 0.0;
