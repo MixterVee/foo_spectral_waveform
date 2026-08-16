@@ -98,6 +98,7 @@
     <ClInclude Include="waveform_cache.h" />
     <ClInclude Include="live_output_capture.h" />
     <ClInclude Include="stem_waveform_provider.h" />
+    <ClInclude Include="stem_transport_service.h" />
     <ClInclude Include="stem_waveform_analysis.h" />
   </ItemGroup>
 
