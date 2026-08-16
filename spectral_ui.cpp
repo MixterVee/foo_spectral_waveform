@@ -53,9 +53,11 @@ static constexpr ULONGLONG kGrabClickThresholdMs = 350;
 static constexpr ULONGLONG kReleaseGlideDurationMs = 260;
 // Reverse audio position arrives in DSP-sized steps. Interpolate the display at
 // the UI timer rate, but never run far ahead of confirmed transport progress.
-static constexpr double kReverseVisualLeadSeconds = 0.140;
-static constexpr double kReverseVisualCatchupSeconds = 0.060;
-static constexpr double kReverseVisualMaxLagSeconds = 0.180;
+// Keep enough extrapolation headroom to bridge coarse DSP callbacks without
+// freezing the reverse waveform between blocks. Visual catch-up is speed-limited
+// below, so a late authoritative update cannot create a visible jump.
+static constexpr double kReverseVisualLeadSeconds = 0.300;
+static constexpr double kReverseVisualMaxSpeed = 1.75;
 static constexpr UINT kMenuStemBase = 1000;
 
 enum stem_menu_command : unsigned {
@@ -580,27 +582,19 @@ private:
         const double target = std::clamp(
             m_reverseVisualConfirmedPosition - confirmedAge / length, 0.0, 1.0);
 
-        // Advance at 1x every UI frame. If a newly confirmed DSP position is a
-        // little farther back, ease toward it instead of snapping the waveform.
-        double visual = std::clamp(
-            m_reverseVisualPosition - dt / length, 0.0, 1.0);
+        // Drive the display from a timer-rate target, but never hard-clamp to a
+        // newly confirmed DSP block. Hard clamps were the remaining visible
+        // staircase. If authority is behind the extrapolated display, simply
+        // wait for it to catch up; reverse motion must never jump forward.
+        double visual = m_reverseVisualPosition;
         if (target < visual && dt > 0.0) {
-            const double alpha = 1.0 - std::exp(-dt / kReverseVisualCatchupSeconds);
-            visual += (target - visual) * alpha;
+            const double nominal_step = dt / length;
+            const double gap = visual - target;
+            const double max_step = nominal_step * kReverseVisualMaxSpeed;
+            visual -= (std::min)(gap, max_step);
         }
 
-        // Never display audio earlier than the bounded extrapolated target. Once
-        // confirmed progress is stale for 140 ms, this clamp freezes the waveform.
-        visual = std::max(visual, target);
-
-        // Conversely, do not let a coarse authoritative jump leave the graphic
-        // hundreds of milliseconds behind the audio while it catches up.
-        visual = std::min(
-            visual, target + kReverseVisualMaxLagSeconds / length);
-
-        // Reverse motion is monotonic. Small transport jitter must not make the
-        // waveform briefly move forward.
-        visual = std::min(visual, m_reverseVisualPosition);
+        visual = (std::min)(visual, m_reverseVisualPosition);
         m_reverseVisualPosition = std::clamp(visual, 0.0, 1.0);
     }
 
@@ -614,12 +608,16 @@ private:
         auto transport = find_transport_service();
         if (length <= 0.0 || transport.is_empty()) return;
 
+        const double seconds = positionFrac * length;
         try {
-            transport->set_reverse(positionFrac * length);
+            transport->set_reverse(seconds);
         } catch (...) {
             return;
         }
 
+        // Mark reverse active before flushing playback so the seek callback cannot
+        // recenter the normal forward playhead. With REVERSE already armed, the
+        // next decoded output is reverse/silence rather than queued forward audio.
         m_reverseReturnToHold = m_touchHoldLatched;
         m_reverseLatched = latched;
         m_reverseKeyHeld = !latched;
@@ -629,6 +627,11 @@ private:
         m_reverseVisualLastTick = GetTickCount64();
         m_reverseVisualConfirmedTick = m_reverseVisualLastTick;
         m_releaseGlideActive = false;
+
+        if (pc->is_playing() && !pc->is_paused() && pc->playback_can_seek()) {
+            pc->playback_seek(seconds);
+        }
+
         invalidate_frame();
     }
 
