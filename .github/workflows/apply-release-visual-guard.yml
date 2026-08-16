@@ -1,0 +1,25 @@
+name: Apply release visual guard
+
+on:
+  push:
+    paths:
+      - '.github/release_visual_guard_patch.py'
+      - '.github/workflows/apply-release-visual-guard.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python .github/release_visual_guard_patch.py
+      - name: Commit source change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add spectral_ui.cpp
+          git commit -m "Keep zoomed reverse release visually anchored"
+          git push
