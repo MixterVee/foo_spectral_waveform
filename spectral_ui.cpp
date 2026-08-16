@@ -51,6 +51,11 @@ static constexpr ULONGLONG kScrubSeekIntervalMs = 250;
 static constexpr ULONGLONG kScrubMotionTailMs = 40;
 static constexpr ULONGLONG kGrabClickThresholdMs = 350;
 static constexpr ULONGLONG kReleaseGlideDurationMs = 260;
+// After Reverse releases, bridge from the platter clock to foobar's normal
+// playback clock gradually. A direct clock switch is visible as a large hop
+// at high zoom because release_wait reports a fixed transport position.
+static constexpr double kReverseReleaseMaxCatchupRate = 0.45;
+static constexpr double kReverseReleaseSettleSeconds = 0.008;
 // Reverse display runs from the UI wall clock at exactly 1x. The DSP transport
 // remains responsible for audio, while release seeks to the visible platter
 // position so coarse audio callbacks can never make the waveform jump.
@@ -203,7 +208,8 @@ private:
             update_reverse_visual_clock();
             update_scrub_motion_gate();
             update_transport_release_wait();
-            bool viewChanged = update_release_glide();
+            bool viewChanged = update_reverse_release_visual_clock();
+            if (!viewChanged) viewChanged = update_release_glide();
             if (!viewChanged) viewChanged = update_follow_view();
             if (spectral_waveform::live_output_capture::animation_active()) {
                 // Progressive stem blocks dissolve into place for a few frames.
@@ -359,6 +365,11 @@ private:
         // DSP-sized position steps. Audio remains authoritative underneath.
         if (reverse_active() && m_reverseVisualActive) {
             out = std::clamp(m_reverseVisualPosition, 0.0, 1.0);
+            return true;
+        }
+
+        if (m_reverseReleaseVisualActive) {
+            out = std::clamp(m_reverseReleaseVisualPosition, 0.0, 1.0);
             return true;
         }
 
@@ -589,6 +600,90 @@ private:
             m_reverseVisualPosition - dt / length, 0.0, 1.0);
     }
 
+    void start_reverse_release_visual(double positionFrac) {
+        if (!m_followPlayhead || m_followMode != follow_mode::centered ||
+            m_viewSpan >= 0.9995 || m_wnd == nullptr) {
+            m_reverseReleaseVisualActive = false;
+            return;
+        }
+
+        m_reverseReleaseVisualActive = true;
+        m_reverseReleaseVisualPosition = std::clamp(positionFrac, 0.0, 1.0);
+        m_reverseReleaseVisualLastTick = GetTickCount64();
+        m_viewStart = m_reverseReleaseVisualPosition - m_viewSpan * 0.5;
+        m_viewStart = std::clamp(m_viewStart, 0.0, 1.0 - m_viewSpan);
+        invalidate_frame();
+    }
+
+    bool update_reverse_release_visual_clock() {
+        if (!m_reverseReleaseVisualActive) return false;
+        if (!m_followPlayhead || m_followMode != follow_mode::centered ||
+            m_viewSpan >= 0.9995 || m_wnd == nullptr) {
+            m_reverseReleaseVisualActive = false;
+            return false;
+        }
+
+        auto pc = playback_control::get();
+        const double length = pc->playback_get_length_ex();
+        if (!pc->is_playing() || length <= 0.0) {
+            m_reverseReleaseVisualActive = false;
+            return false;
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        if (m_reverseReleaseVisualLastTick == 0) {
+            m_reverseReleaseVisualLastTick = now;
+            return true;
+        }
+
+        const double dt = std::min(
+            0.050, static_cast<double>(now - m_reverseReleaseVisualLastTick) / 1000.0);
+        m_reverseReleaseVisualLastTick = now;
+
+        if (!pc->is_paused() && dt > 0.0) {
+            double predicted = std::clamp(
+                m_reverseReleaseVisualPosition + dt / length, 0.0, 1.0);
+
+            // While Stem Separator still reports release_wait, advance at exactly
+            // 1x instead of displaying its fixed release position. Once transport
+            // becomes normal, gently phase-lock to foobar's playback clock.
+            bool normalReady = !m_transportReleasePending;
+            auto transport = find_transport_service();
+            if (!transport.is_empty()) {
+                try {
+                    normalReady = normalReady &&
+                        transport->get_state() == stem_transport_normal;
+                } catch (...) {
+                    normalReady = !m_transportReleasePending;
+                }
+            }
+
+            if (normalReady) {
+                const double normalPosition = std::clamp(
+                    pc->playback_get_position() / length, 0.0, 1.0);
+                const double error = normalPosition - predicted;
+                const double maxCorrection =
+                    (dt * kReverseReleaseMaxCatchupRate) / length;
+                const double correction = std::clamp(
+                    error * 0.25, -maxCorrection, maxCorrection);
+                predicted = std::clamp(predicted + correction, 0.0, 1.0);
+
+                if (std::abs(normalPosition - predicted) * length <=
+                    kReverseReleaseSettleSeconds) {
+                    predicted = normalPosition;
+                    m_reverseReleaseVisualActive = false;
+                }
+            }
+
+            m_reverseReleaseVisualPosition = predicted;
+        }
+
+        m_viewStart = m_reverseReleaseVisualPosition - m_viewSpan * 0.5;
+        m_viewStart = std::clamp(m_viewStart, 0.0, 1.0 - m_viewSpan);
+        invalidate_frame();
+        return true;
+    }
+
     void begin_reverse_transport(bool latched) {
         if (m_transportReleasePending || !touch_hold_can_start()) return;
         double positionFrac = 0.0;
@@ -609,6 +704,8 @@ private:
         // Mark reverse active before flushing playback so the seek callback cannot
         // recenter the normal forward playhead. With REVERSE already armed, the
         // next decoded output is reverse/silence rather than queued forward audio.
+        m_reverseReleaseVisualActive = false;
+        m_reverseReleaseVisualLastTick = 0;
         m_reverseReturnToHold = m_touchHoldLatched;
         m_reverseLatched = latched;
         m_reverseKeyHeld = !latched;
@@ -656,11 +753,14 @@ private:
         m_releaseGlideActive = false;
 
         if (returnToHold) {
+            m_reverseReleaseVisualActive = false;
+            m_reverseReleaseVisualLastTick = 0;
             m_touchHoldPosition = positionFrac;
             m_touchHoldAnchorX = 0.5;
             set_transport_hold(positionFrac);
         } else {
             release_transport_to(positionFrac);
+            start_reverse_release_visual(positionFrac);
         }
         invalidate_frame();
     }
@@ -794,7 +894,7 @@ private:
 
     bool update_follow_view() {
         if ((m_touchHoldLatched && !reverse_active()) || m_releaseGlideActive ||
-            m_transportReleasePending || !m_followPlayhead ||
+            m_reverseReleaseVisualActive || m_transportReleasePending || !m_followPlayhead ||
             m_viewSpan >= 0.9995 || m_dragging || m_wnd == nullptr) return false;
         auto pc = playback_control::get();
         if (!pc->is_playing() || pc->is_paused()) return false;
@@ -842,6 +942,10 @@ private:
         if (m_touchHoldLatched && !reverse_active()) {
             const double anchor = std::clamp(m_touchHoldAnchorX, 0.0, 1.0);
             return static_cast<int>(std::lround(anchor * std::max(0, width - 1)));
+        }
+
+        if (m_reverseReleaseVisualActive) {
+            return static_cast<int>(std::lround(0.5 * std::max(0, width - 1)));
         }
 
         if (m_releaseGlideActive) {
@@ -1828,6 +1932,8 @@ private:
         m_reverseReturnToHold = false;
         m_reverseVisualActive = false;
         m_reverseVisualLastTick = 0;
+        m_reverseReleaseVisualActive = false;
+        m_reverseReleaseVisualLastTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
         start_analysis(track);
@@ -1844,6 +1950,8 @@ private:
         m_reverseReturnToHold = false;
         m_reverseVisualActive = false;
         m_reverseVisualLastTick = 0;
+        m_reverseReleaseVisualActive = false;
+        m_reverseReleaseVisualLastTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
         stop_analysis();
@@ -1853,7 +1961,7 @@ private:
         // Continuous seeks generated by a centered grab must not fight the user's
         // drag by recentering the view on every seek callback.
         if (m_centerScrubbing || m_touchHoldLatched || reverse_active() ||
-            m_transportReleasePending || m_releaseGlideActive) {
+            m_reverseReleaseVisualActive || m_transportReleasePending || m_releaseGlideActive) {
             invalidate_playhead();
             return;
         }
@@ -1916,6 +2024,9 @@ private:
     bool m_reverseVisualActive = false;
     ULONGLONG m_reverseVisualLastTick = 0;
     double m_reverseVisualPosition = 0.0;
+    bool m_reverseReleaseVisualActive = false;
+    ULONGLONG m_reverseReleaseVisualLastTick = 0;
+    double m_reverseReleaseVisualPosition = 0.0;
     bool m_transportReleasePending = false;
     bool m_releasePauseOwned = false;
     double m_transportReleaseTarget = 0.0;
