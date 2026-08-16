@@ -22,4 +22,14 @@ public:
     virtual int get_state() = 0;
     virtual double get_position_seconds() = 0;
     virtual bool is_position_ready(double position_seconds) = 0;
+
+    virtual bool publish_cache_block(
+        const char* track_path_utf8,
+        double start_seconds,
+        const float* original,
+        const float* vocals,
+        const float* instrumental,
+        t_size frames,
+        unsigned channels,
+        unsigned sample_rate) = 0;
 };
