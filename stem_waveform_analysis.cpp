@@ -7,6 +7,7 @@
 #include "spectral_analyzer.h"
 #include "stem_waveform_analysis.h"
 #include "stem_waveform_provider.h"
+#include "stem_transport_service.h"
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +33,13 @@ stem_waveform_provider::ptr find_provider() {
     auto e = stem_waveform_provider::enumerate();
     if (!e.first(provider)) provider.release();
     return provider;
+}
+
+stem_transport_service::ptr find_transport_service() {
+    stem_transport_service::ptr service;
+    auto e = stem_transport_service::enumerate();
+    if (!e.first(service)) service.release();
+    return service;
 }
 
 void merge_block(
@@ -88,6 +96,10 @@ bool analyze_stems_progressive(
         console::print("foo_spectral_waveform: Stem Waveform Provider was not found.");
         return false;
     }
+    // Optional companion service. New Stem Separator builds expose this so the
+    // exact PCM that creates each progressive waveform block can also become
+    // immediately available to audible jog/reverse transport.
+    auto transport = find_transport_service();
 
     // Seeking remains enabled so uncached stem waveforms can begin around the
     // current playhead. Seekable inputs are analyzed with context on both sides
@@ -156,6 +168,23 @@ bool analyze_stems_progressive(
         }
 
         const size_t trimSample = trimStartFrames * channels;
+
+        if (!transport.is_empty()) {
+            try {
+                transport->publish_cache_block(
+                    track->get_path(),
+                    targetStartSeconds,
+                    pcm + trimSample,
+                    vocals.data() + trimSample,
+                    instrumental.data() + trimSample,
+                    static_cast<t_size>(targetFrames),
+                    channels,
+                    sampleRate);
+            } catch (...) {
+                // Transport sharing is an optimization. Never let an older or
+                // unavailable Stem Separator interfere with waveform analysis.
+            }
+        }
 
         spectral_analyzer vocalsAnalyzer(sampleRate, channels);
         vocalsAnalyzer.feed(vocals.data() + trimSample, targetFrames);
