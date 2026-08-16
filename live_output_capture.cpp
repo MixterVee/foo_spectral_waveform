@@ -10,6 +10,7 @@
 #include "waveform_cache.h"
 
 #include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -21,10 +22,14 @@ namespace spectral_waveform::live_output_capture {
 namespace {
 
 static const wchar_t* kWaveformWindowClass = L"foo_spectral_waveform_ui_v03";
+static constexpr ULONGLONG kPreviewFadeMs = 420;
 
 std::mutex g_previewMutex;
 std::shared_ptr<const waveform_data> g_vocalsPreview;
 std::shared_ptr<const waveform_data> g_instrumentalPreview;
+std::shared_ptr<const waveform_data> g_previousVocalsPreview;
+std::shared_ptr<const waveform_data> g_previousInstrumentalPreview;
+ULONGLONG g_previewFadeStart = 0;
 int g_selectedMode = 0;
 HWND g_mainWindow = nullptr;
 
@@ -53,9 +58,24 @@ void set_selected_mode(int mode, bool invalidate) {
     if (invalidate) invalidate_waveform_windows();
 }
 
-void publish_previews(const waveform_data& vocals, const waveform_data& instrumental) {
+void publish_previews(
+    const waveform_data& vocals,
+    const waveform_data& instrumental,
+    bool animate) {
+
     {
         std::lock_guard<std::mutex> lock(g_previewMutex);
+
+        if (animate && g_vocalsPreview && g_instrumentalPreview) {
+            g_previousVocalsPreview = g_vocalsPreview;
+            g_previousInstrumentalPreview = g_instrumentalPreview;
+            g_previewFadeStart = GetTickCount64();
+        } else {
+            g_previousVocalsPreview.reset();
+            g_previousInstrumentalPreview.reset();
+            g_previewFadeStart = 0;
+        }
+
         g_vocalsPreview = std::make_shared<waveform_data>(vocals);
         g_instrumentalPreview = std::make_shared<waveform_data>(instrumental);
     }
@@ -67,15 +87,58 @@ void clear_previews(bool invalidate) {
         std::lock_guard<std::mutex> lock(g_previewMutex);
         g_vocalsPreview.reset();
         g_instrumentalPreview.reset();
+        g_previousVocalsPreview.reset();
+        g_previousInstrumentalPreview.reset();
+        g_previewFadeStart = 0;
     }
     if (invalidate) invalidate_waveform_windows();
 }
 
-std::shared_ptr<const waveform_data> preview_snapshot() {
+struct preview_blend_snapshot {
+    std::shared_ptr<const waveform_data> previous;
+    std::shared_ptr<const waveform_data> current;
+    double mix = 1.0;
+};
+
+preview_blend_snapshot preview_snapshot() {
     std::lock_guard<std::mutex> lock(g_previewMutex);
-    if (g_selectedMode == 1) return g_vocalsPreview;
-    if (g_selectedMode == 2) return g_instrumentalPreview;
-    return {};
+
+    preview_blend_snapshot out;
+    if (g_selectedMode == 1) {
+        out.previous = g_previousVocalsPreview;
+        out.current = g_vocalsPreview;
+    } else if (g_selectedMode == 2) {
+        out.previous = g_previousInstrumentalPreview;
+        out.current = g_instrumentalPreview;
+    } else {
+        return out;
+    }
+
+    if (!out.current) return out;
+    if (!out.previous || g_previewFadeStart == 0) {
+        out.previous.reset();
+        out.mix = 1.0;
+        return out;
+    }
+
+    const ULONGLONG elapsed = GetTickCount64() - g_previewFadeStart;
+    if (elapsed >= kPreviewFadeMs) {
+        // The fade has finished. Drop the previous full-track snapshots so they
+        // do not remain resident after the transition is no longer visible.
+        g_previousVocalsPreview.reset();
+        g_previousInstrumentalPreview.reset();
+        g_previewFadeStart = 0;
+        out.previous.reset();
+        out.mix = 1.0;
+        return out;
+    }
+
+    // Smoothstep avoids a mechanical-looking linear dissolve at either end.
+    const double t = std::clamp(
+        static_cast<double>(elapsed) / static_cast<double>(kPreviewFadeMs),
+        0.0, 1.0);
+    out.mix = t * t * (3.0 - 2.0 * t);
+    return out;
 }
 
 bool same_track(metadb_handle_ptr a, metadb_handle_ptr b) {
@@ -195,7 +258,9 @@ private:
                         load_stem_waveform_cache(track, 2, cachedInstrumental, *aborter);
 
                     if (haveVocals && haveInstrumental && is_current(generation)) {
-                        publish_previews(cachedVocals, cachedInstrumental);
+                        // Already-cached tracks stay instant. The visual dissolve is
+                        // reserved for newly completing progressive analysis blocks.
+                        publish_previews(cachedVocals, cachedInstrumental, false);
                         completed = true;
                     } else {
                         waveform_data original;
@@ -218,6 +283,11 @@ private:
                             waveform_data vocalsFinal;
                             waveform_data instrumentalFinal;
 
+                            // Seed the preview with Original. The first completed
+                            // stem block can then fade from the exact graphic the
+                            // user was already seeing instead of appearing abruptly.
+                            publish_previews(original, original, false);
+
                             const bool analyzed = analyze_stems_progressive(
                                 track,
                                 original,
@@ -227,7 +297,7 @@ private:
                                     const waveform_data& vocals,
                                     const waveform_data& instrumental) {
                                     if (aborter->is_aborting() || !is_current(generation)) return;
-                                    publish_previews(vocals, instrumental);
+                                    publish_previews(vocals, instrumental, true);
                                 },
                                 vocalsFinal,
                                 instrumentalFinal);
@@ -235,7 +305,10 @@ private:
                             if (analyzed && is_current(generation) && !aborter->is_aborting()) {
                                 save_stem_waveform_cache(track, 1, vocalsFinal, *aborter);
                                 save_stem_waveform_cache(track, 2, instrumentalFinal, *aborter);
-                                publish_previews(vocalsFinal, instrumentalFinal);
+                                // The last progressive callback already supplied the
+                                // final graphic. Republish without animation merely
+                                // settles state and releases any previous snapshot.
+                                publish_previews(vocalsFinal, instrumentalFinal, false);
                                 completed = true;
                             }
                         }
@@ -349,10 +422,24 @@ public:
 
 static service_factory_single_t<capture_lifecycle> g_capture_lifecycle_factory;
 
-} // namespace
+waveform_point blend_point(const waveform_point& a, const waveform_point& b, double mix) {
+    mix = std::clamp(mix, 0.0, 1.0);
+    const double inv = 1.0 - mix;
 
-bool point_at(double seconds, waveform_point& out) {
-    auto preview = preview_snapshot();
+    waveform_point out{};
+    out.peak = static_cast<std::uint16_t>(std::lround(a.peak * inv + b.peak * mix));
+    out.rms = static_cast<std::uint16_t>(std::lround(a.rms * inv + b.rms * mix));
+    out.bass = static_cast<std::uint8_t>(std::lround(a.bass * inv + b.bass * mix));
+    out.mids = static_cast<std::uint8_t>(std::lround(a.mids * inv + b.mids * mix));
+    out.treble = static_cast<std::uint8_t>(std::lround(a.treble * inv + b.treble * mix));
+    return out;
+}
+
+bool point_from_preview(
+    const std::shared_ptr<const waveform_data>& preview,
+    double seconds,
+    waveform_point& out) {
+
     if (!preview || preview->points.empty() || preview->duration_seconds <= 0.0) return false;
 
     const double frac = std::clamp(seconds / preview->duration_seconds, 0.0, 1.0);
@@ -362,8 +449,12 @@ bool point_at(double seconds, waveform_point& out) {
     return true;
 }
 
-bool aggregate(double start_seconds, double end_seconds, waveform_point& out) {
-    auto preview = preview_snapshot();
+bool aggregate_from_preview(
+    const std::shared_ptr<const waveform_data>& preview,
+    double start_seconds,
+    double end_seconds,
+    waveform_point& out) {
+
     if (!preview || preview->points.empty() || preview->duration_seconds <= 0.0) return false;
 
     if (end_seconds <= start_seconds) end_seconds = start_seconds + 0.005;
@@ -399,6 +490,61 @@ bool aggregate(double start_seconds, double end_seconds, waveform_point& out) {
     out.mids = static_cast<std::uint8_t>(mids / n);
     out.treble = static_cast<std::uint8_t>(treble / n);
     return true;
+}
+
+} // namespace
+
+bool point_at(double seconds, waveform_point& out) {
+    const auto preview = preview_snapshot();
+    waveform_point current{};
+    if (!point_from_preview(preview.current, seconds, current)) return false;
+
+    if (!preview.previous || preview.mix >= 1.0) {
+        out = current;
+        return true;
+    }
+
+    waveform_point previous{};
+    if (!point_from_preview(preview.previous, seconds, previous)) {
+        out = current;
+        return true;
+    }
+
+    out = blend_point(previous, current, preview.mix);
+    return true;
+}
+
+bool aggregate(double start_seconds, double end_seconds, waveform_point& out) {
+    const auto preview = preview_snapshot();
+    waveform_point current{};
+    if (!aggregate_from_preview(preview.current, start_seconds, end_seconds, current)) return false;
+
+    if (!preview.previous || preview.mix >= 1.0) {
+        out = current;
+        return true;
+    }
+
+    waveform_point previous{};
+    if (!aggregate_from_preview(preview.previous, start_seconds, end_seconds, previous)) {
+        out = current;
+        return true;
+    }
+
+    out = blend_point(previous, current, preview.mix);
+    return true;
+}
+
+bool animation_active() {
+    std::lock_guard<std::mutex> lock(g_previewMutex);
+    if (g_selectedMode != 1 && g_selectedMode != 2) return false;
+    if (g_previewFadeStart == 0) return false;
+
+    const bool havePrevious = g_selectedMode == 1
+        ? static_cast<bool>(g_previousVocalsPreview)
+        : static_cast<bool>(g_previousInstrumentalPreview);
+    if (!havePrevious) return false;
+
+    return GetTickCount64() - g_previewFadeStart < kPreviewFadeMs;
 }
 
 void reset() {
