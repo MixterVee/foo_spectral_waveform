@@ -1,0 +1,30 @@
+name: Apply re-analysis patch v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-reanalysis-patch-v3.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply source patch
+        run: python .github/reanalysis_patch.py
+
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add waveform_cache.h waveform_cache.cpp live_output_capture.h live_output_capture.cpp spectral_ui.cpp
+          git diff --cached --check
+          git commit -m "Add Re-analyze Current Track recovery"
+          git push origin HEAD:main
