@@ -137,9 +137,17 @@ private:
         switch (msg) {
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
-        case WM_TIMER:
-            if (!update_follow_view()) invalidate_playhead();
+        case WM_TIMER: {
+            const bool viewChanged = update_follow_view();
+            if (spectral_waveform::live_output_capture::animation_active()) {
+                // Progressive stem blocks dissolve into place for a few frames.
+                // Rebuild the bitmap only while that short visual transition runs.
+                invalidate_all();
+            } else if (!viewChanged) {
+                invalidate_playhead();
+            }
             return 0;
+        }
         case WM_SIZE:
             invalidate_all();
             return 0;
