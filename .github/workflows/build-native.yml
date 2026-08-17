@@ -12,10 +12,6 @@ jobs:
       - name: Checkout project
         uses: actions/checkout@v4
 
-      - name: Apply stem waveform preload/switch polish
-        shell: pwsh
-        run: .\tools\apply_stem_waveform_polish_patch.ps1
-
       - name: Get foobar2000 SDK
         shell: pwsh
         run: |
