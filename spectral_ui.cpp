@@ -435,18 +435,20 @@ private:
 
         const ULONGLONG now = GetTickCount64();
         if (now - m_scrubLastMotionTick <= kScrubMotionTailMs) {
-            // Keepalive only. The matching Stem Separator build detects an
-            // unchanged target and extends audibility without rewinding the
-            // preview cursor back to the same sample every timer tick.
-            if (!set_transport_scrub(m_scrubTargetPosition)) {
-                m_scrubAudibleActive = false;
-            }
+            // Actual WM_MOUSEMOVE events already send SCRUB targets. Do not send
+            // unchanged keepalives here: the matching Stem build reserves one
+            // unchanged target as the explicit soft-idle signal below.
             return;
         }
 
-        // No real mouse movement recently: return to the stationary platter
-        // state immediately instead of waiting for an internal audio timeout.
-        set_transport_hold(m_scrubTargetPosition);
+        // The hand stopped while the platter is still physically grabbed. Keep
+        // transport in SCRUB and send one unchanged target so Stem can silence its
+        // renderer without seeking/flush. A hard HOLD seek here used to discard
+        // short scratch audio that was still queued in foobar's output pipeline.
+        if (!set_transport_scrub(m_scrubTargetPosition)) {
+            // Compatibility fallback for a missing transport service.
+            set_transport_hold(m_scrubTargetPosition);
+        }
         m_scrubAudibleActive = false;
     }
 
