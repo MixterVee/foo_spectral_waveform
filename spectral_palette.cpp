@@ -19,23 +19,27 @@ rgb_color color_for_point(const waveform_point& p) {
     // linear RGB mix makes most full-range music converge toward the same
     // pastel color. Re-expand the differences here so the dominant frequency
     // region is immediately obvious, like a DJ waveform.
-    constexpr float kBandContrast = 1.75f;
+    //
+    // V3 deliberately uses a gentler contrast than V2. The analyzer now carries
+    // real relative band dominance, so the palette no longer needs to force the
+    // winning band nearly to a primary color.
+    constexpr float kBandContrast = 1.30f;
     const float low = std::pow(clamp01(low_raw), kBandContrast);
     const float mid = std::pow(clamp01(mid_raw), kBandContrast);
     const float high = std::pow(clamp01(high_raw), kBandContrast);
 
-    // Bass -> warm red/orange, mids/vocals -> green with a little warmth,
-    // treble/transients -> blue/cyan. Small cross-band contributions keep
-    // mixed material naturally yellow/cyan/magenta instead of hard primaries.
-    float r = 1.10f * low + 0.30f * mid + 0.02f * high;
-    float g = 0.10f * low + 1.00f * mid + 0.24f * high;
-    float b = 0.01f * low + 0.15f * mid + 1.16f * high;
+    // Bass -> red/orange, mids/vocals -> yellow/green, treble/transients ->
+    // cyan/blue. Stronger cross-band contributions make transitions smoother
+    // and keep mixed musical material from collapsing into solid red.
+    float r = 1.00f * low + 0.45f * mid + 0.04f * high;
+    float g = 0.28f * low + 1.00f * mid + 0.35f * high;
+    float b = 0.03f * low + 0.22f * mid + 1.00f * high;
 
-    // Remove part of the common RGB floor. This raises saturation only when
-    // all three channels are present, preserving broadband white-ish peaks
-    // while making genuinely dominant bands much easier to distinguish.
+    // Only a light common-floor reduction is needed with normalized spectral
+    // shares. This retains saturation where one band is genuinely dominant but
+    // allows broadband passages to blend into richer intermediate colors.
     const float common = std::min({r, g, b});
-    constexpr float kCommonRemoval = 0.32f;
+    constexpr float kCommonRemoval = 0.08f;
     r = std::max(0.0f, r - common * kCommonRemoval);
     g = std::max(0.0f, g - common * kCommonRemoval);
     b = std::max(0.0f, b - common * kCommonRemoval);
