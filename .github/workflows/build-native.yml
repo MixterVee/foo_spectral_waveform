@@ -35,6 +35,10 @@ jobs:
         run: |
           msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\x64\Release\"
 
+      - name: Apply mute-on-grab patch
+        shell: pwsh
+        run: .\tools\apply_mute_grab_patch.ps1
+
       - name: Build foo_spectral_waveform
         shell: pwsh
         run: |
