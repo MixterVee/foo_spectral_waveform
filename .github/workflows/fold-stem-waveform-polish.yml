@@ -1,0 +1,35 @@
+name: Fold stem waveform polish into source
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fold-stem-waveform-polish.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply tested stem waveform polish
+        shell: pwsh
+        run: .\tools\apply_stem_waveform_polish_patch.ps1
+
+      - name: Commit permanent source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add live_output_capture.cpp
+          if (git diff --cached --quiet) {
+            Write-Host "No source changes to commit."
+            exit 0
+          }
+          git commit -m "Fold stem waveform preload polish into source"
+          git push origin HEAD:main
