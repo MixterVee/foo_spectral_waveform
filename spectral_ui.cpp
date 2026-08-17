@@ -1553,6 +1553,75 @@ private:
         DrawTextW(dc, label, -1, &textRc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
+    void draw_transport_debug_overlay(HDC dc, int width, int height) const {
+        if (dc == nullptr || width < 300 || height < 80) return;
+
+        auto transport = find_transport_service();
+        if (transport.is_empty()) return;
+
+        stem_transport_debug_status st{};
+        try {
+            if (!transport->get_debug_status(st)) return;
+        } catch (...) {
+            return;
+        }
+
+        const wchar_t* mode = st.mode == 0 ? L"O" : (st.mode == 1 ? L"V" : L"I");
+        const wchar_t* state =
+            st.state == stem_transport_normal ? L"N" :
+            st.state == stem_transport_hold ? L"H" :
+            st.state == stem_transport_scrub ? L"S" :
+            st.state == stem_transport_reverse ? L"R" : L"W";
+        const wchar_t* source =
+            st.last_render_source == stem_debug_source_live ? L"LIVE" :
+            st.last_render_source == stem_debug_source_cache ? L"CACHE" :
+            st.last_render_source == stem_debug_source_miss ? L"MISS" : L"-";
+
+        wchar_t line1[256]{};
+        wchar_t line2[320]{};
+        swprintf_s(line1, std::size(line1),
+            L"SCRATCH DBG  %s/%s  %s %s  pos %.2f  render %.2f  vel %+.2f  req %.2f@%+.2f",
+            mode, state, source, st.last_render_ok ? L"OK" : L"--",
+            st.position_seconds, st.render_seconds, st.scrub_velocity,
+            st.last_render_start_seconds, st.last_source_rate);
+
+        if (st.live_start_seconds >= 0.0 && st.live_end_seconds >= 0.0) {
+            swprintf_s(line2, std::size(line2),
+                L"RAM %.2f..%.2f   TRY %llu OK %llu   LIVE %llu CACHE %llu MISS %llu   OUT audio %llu silence %llu",
+                st.live_start_seconds, st.live_end_seconds,
+                static_cast<unsigned long long>(st.render_attempts),
+                static_cast<unsigned long long>(st.render_successes),
+                static_cast<unsigned long long>(st.live_hits),
+                static_cast<unsigned long long>(st.cache_hits),
+                static_cast<unsigned long long>(st.render_misses),
+                static_cast<unsigned long long>(st.scrub_audio_writes),
+                static_cast<unsigned long long>(st.scrub_silence_writes));
+        } else {
+            swprintf_s(line2, std::size(line2),
+                L"RAM EMPTY   TRY %llu OK %llu   LIVE %llu CACHE %llu MISS %llu   OUT audio %llu silence %llu",
+                static_cast<unsigned long long>(st.render_attempts),
+                static_cast<unsigned long long>(st.render_successes),
+                static_cast<unsigned long long>(st.live_hits),
+                static_cast<unsigned long long>(st.cache_hits),
+                static_cast<unsigned long long>(st.render_misses),
+                static_cast<unsigned long long>(st.scrub_audio_writes),
+                static_cast<unsigned long long>(st.scrub_silence_writes));
+        }
+
+        const int right = std::min(width - 6, 1250);
+        RECT box{6, 30, right, 68};
+        HBRUSH background = CreateSolidBrush(query_color(ui_color_background, COLOR_WINDOW));
+        FillRect(dc, &box, background);
+        DeleteObject(background);
+
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, query_color(ui_color_text, COLOR_WINDOWTEXT));
+        RECT r1{10, 31, right - 4, 48};
+        RECT r2{10, 49, right - 4, 67};
+        DrawTextW(dc, line1, -1, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        DrawTextW(dc, line2, -1, &r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    }
+
     static COLORREF blend_color(COLORREF foreground, COLORREF background, unsigned foregroundPercent) {
         foregroundPercent = std::min(100u, foregroundPercent);
         const unsigned backgroundPercent = 100u - foregroundPercent;
@@ -1827,6 +1896,7 @@ private:
                 m_lastPlayX = playX;
             }
             draw_view_overlay(dc, width, height);
+            draw_transport_debug_overlay(dc, width, height);
         }
 
         EndPaint(m_wnd, &ps);
