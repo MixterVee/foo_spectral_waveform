@@ -51,11 +51,17 @@ void invalidate_waveform_windows() {
 }
 
 void set_selected_mode(int mode, bool invalidate) {
+    bool changed = false;
     {
         std::lock_guard<std::mutex> lock(g_previewMutex);
-        g_selectedMode = (mode == 1 || mode == 2) ? mode : 0;
+        const int normalized = (mode == 1 || mode == 2) ? mode : 0;
+        changed = normalized != g_selectedMode;
+        g_selectedMode = normalized;
     }
-    if (invalidate) invalidate_waveform_windows();
+    // Playback-time/seek callbacks can report the same mode repeatedly. Avoid
+    // throwing away the waveform bitmap unless the selected visual source really
+    // changed; progressive preview publication still invalidates on new data.
+    if (invalidate && changed) invalidate_waveform_windows();
 }
 
 void publish_previews(
@@ -175,6 +181,7 @@ public:
                 m_track = track;
                 m_ready = false;
                 m_hasRequest = false;
+                m_queuedAllowAnalysis = false;
                 // The worker being aborted belongs to the old generation. Mark
                 // the new generation idle so its request can be queued now; the
                 // single worker thread will pick it up after the old one exits.
@@ -184,12 +191,19 @@ public:
             m_mode = mode;
             m_prioritySeconds = std::max(0.0, prioritySeconds);
 
-            // Mode changes on the same track do not cancel a dual-stem pass.
-            // Both stem previews are being generated together, so the UI can
-            // simply select whichever one is requested while work continues.
-            if (mode > 0 && mode <= 2 && track.is_valid() &&
-                !m_ready && !m_analysisActive && !m_hasRequest) {
+            const bool wantsStem = mode > 0 && mode <= 2;
+
+            // On every new track, quietly probe the on-disk Vocals/Instrumental
+            // waveform caches even while Original is selected. This makes the
+            // first visual stem switch on previously analyzed tracks immediate,
+            // but deliberately does NOT start a new Spleeter pass just for a
+            // listener who stays in Original mode.
+            //
+            // If a stem is already selected, allow the normal analysis path.
+            if (track.is_valid() && !m_ready && !m_analysisActive && !m_hasRequest &&
+                (wantsStem || newTrack)) {
                 m_hasRequest = true;
+                m_queuedAllowAnalysis = wantsStem;
                 queueAnalysis = true;
             }
         }
@@ -204,6 +218,7 @@ public:
         if (m_activeAbort) m_activeAbort->abort();
         ++m_generation;
         m_hasRequest = false;
+        m_queuedAllowAnalysis = false;
         m_analysisActive = false;
         m_ready = false;
     }
@@ -213,6 +228,7 @@ public:
         if (m_activeAbort) m_activeAbort->abort();
         ++m_generation;
         m_hasRequest = false;
+        m_queuedAllowAnalysis = false;
         m_analysisActive = false;
         m_ready = false;
     }
@@ -228,6 +244,7 @@ private:
             metadb_handle_ptr track;
             double prioritySeconds = 0.0;
             std::uint64_t generation = 0;
+            bool allowAnalysis = false;
             std::shared_ptr<abort_callback_impl> aborter;
 
             {
@@ -238,7 +255,9 @@ private:
                 track = m_track;
                 prioritySeconds = m_prioritySeconds;
                 generation = m_generation;
+                allowAnalysis = m_queuedAllowAnalysis;
                 m_hasRequest = false;
+                m_queuedAllowAnalysis = false;
                 m_analysisActive = true;
 
                 aborter = std::make_shared<abort_callback_impl>();
@@ -264,7 +283,7 @@ private:
                         publish_previews(cachedVocals, cachedInstrumental, false);
                         rehydrate_transport_pcm_cache(track, prioritySeconds, *aborter);
                         completed = true;
-                    } else {
+                    } else if (allowAnalysis) {
                         waveform_data original;
                         bool haveOriginal = false;
 
@@ -323,14 +342,26 @@ private:
                 }
             }
 
+            bool queueFollowup = false;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (generation == m_generation) {
                     m_analysisActive = false;
-                    if (completed) m_ready = true;
+                    if (completed) {
+                        m_ready = true;
+                    } else if (!allowAnalysis && m_mode > 0 && m_mode <= 2 && !m_hasRequest) {
+                        // The user can select Vocals/Instrumental while a cheap
+                        // cache-only probe is still running. Promote that same
+                        // generation to one real dual-stem analysis pass as soon as
+                        // the probe finishes, rather than losing the request.
+                        m_hasRequest = true;
+                        m_queuedAllowAnalysis = true;
+                        queueFollowup = true;
+                    }
                 }
                 if (m_activeAbort == aborter) m_activeAbort.reset();
             }
+            if (queueFollowup) m_cv.notify_one();
         }
     }
 
@@ -339,6 +370,7 @@ private:
     std::thread m_thread;
     bool m_stop = false;
     bool m_hasRequest = false;
+    bool m_queuedAllowAnalysis = false;
     bool m_analysisActive = false;
     bool m_ready = false;
     std::uint64_t m_generation = 0;
