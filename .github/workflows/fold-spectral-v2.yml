@@ -1,0 +1,35 @@
+name: Fold spectral V2 into source
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fold-spectral-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply tested spectral V2 patch
+        shell: pwsh
+        run: .\tools\apply_spectral_v2_patch.ps1
+
+      - name: Commit permanent source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add spectral_analyzer.cpp spectral_ui.cpp waveform_cache.cpp spectral_palette.cpp
+          if (git diff --cached --quiet) {
+            Write-Host "No source changes to commit."
+            exit 0
+          }
+          git commit -m "Fold spectral V2 analyzer and zoom fixes into source"
+          git push origin HEAD:main
