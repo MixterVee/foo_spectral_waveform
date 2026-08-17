@@ -39,6 +39,10 @@ jobs:
         shell: pwsh
         run: .\tools\apply_mute_grab_patch.ps1
 
+      - name: Remove scratch debug overlay
+        shell: pwsh
+        run: .\tools\remove_scratch_debug_overlay.ps1
+
       - name: Build foo_spectral_waveform
         shell: pwsh
         run: |
