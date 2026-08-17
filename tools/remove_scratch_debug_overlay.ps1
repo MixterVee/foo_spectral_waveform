@@ -18,17 +18,16 @@ $source = [regex]::Replace(
     "`n    static COLORREF blend_color",
     1)
 
-$callOld = @'
-            draw_view_overlay(dc, width, height);
-            draw_transport_debug_overlay(dc, width, height);
-'@
-$callNew = @'
-            draw_view_overlay(dc, width, height);
-'@
-if (-not $source.Contains($callOld)) {
-    throw 'Scratch-debug cleanup: overlay call site not found.'
+$callPattern = '            draw_view_overlay\(dc, width, height\);\n            draw_transport_debug_overlay\(dc, width, height\);'
+$callMatches = [regex]::Matches($source, $callPattern)
+if ($callMatches.Count -ne 1) {
+    throw "Scratch-debug cleanup: expected one overlay call site, found $($callMatches.Count)."
 }
-$source = $source.Replace($callOld, $callNew)
+$source = [regex]::Replace(
+    $source,
+    $callPattern,
+    '            draw_view_overlay(dc, width, height);',
+    1)
 
 [System.IO.File]::WriteAllText(
     $path,
