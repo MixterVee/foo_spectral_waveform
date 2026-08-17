@@ -20,26 +20,26 @@ rgb_color color_for_point(const waveform_point& p) {
     // pastel color. Re-expand the differences here so the dominant frequency
     // region is immediately obvious, like a DJ waveform.
     //
-    // V3 deliberately uses a gentler contrast than V2. The analyzer now carries
-    // real relative band dominance, so the palette no longer needs to force the
-    // winning band nearly to a primary color.
-    constexpr float kBandContrast = 1.30f;
+    // V4 keeps the useful V2/V3 frequency separation but backs off the warm
+    // dominance another small step. The goal is a natural DJ-style gradient,
+    // not large blocks of a nearly primary color.
+    constexpr float kBandContrast = 1.22f;
     const float low = std::pow(clamp01(low_raw), kBandContrast);
     const float mid = std::pow(clamp01(mid_raw), kBandContrast);
     const float high = std::pow(clamp01(high_raw), kBandContrast);
 
     // Bass -> red/orange, mids/vocals -> yellow/green, treble/transients ->
-    // cyan/blue. Stronger cross-band contributions make transitions smoother
-    // and keep mixed musical material from collapsing into solid red.
-    float r = 1.00f * low + 0.45f * mid + 0.04f * high;
-    float g = 0.28f * low + 1.00f * mid + 0.35f * high;
-    float b = 0.03f * low + 0.22f * mid + 1.00f * high;
+    // cyan/blue. Compared with V3, bass contributes less pure red and more
+    // green, while upper-mid/high energy receives slightly more cyan/blue.
+    float r = 0.92f * low + 0.43f * mid + 0.04f * high;
+    float g = 0.34f * low + 1.00f * mid + 0.40f * high;
+    float b = 0.04f * low + 0.27f * mid + 1.06f * high;
 
-    // Only a light common-floor reduction is needed with normalized spectral
-    // shares. This retains saturation where one band is genuinely dominant but
-    // allows broadband passages to blend into richer intermediate colors.
+    // Keep almost all of the common component. The normalized V2 analyzer
+    // already supplies strong band contrast, so only a tiny saturation lift is
+    // needed to stop broadband material from becoming washed out.
     const float common = std::min({r, g, b});
-    constexpr float kCommonRemoval = 0.08f;
+    constexpr float kCommonRemoval = 0.04f;
     r = std::max(0.0f, r - common * kCommonRemoval);
     g = std::max(0.0f, g - common * kCommonRemoval);
     b = std::max(0.0f, b - common * kCommonRemoval);
@@ -49,9 +49,8 @@ rgb_color color_for_point(const waveform_point& p) {
     g /= maxc;
     b /= maxc;
 
-    // Keep amplitude encoded in brightness, but give quieter details a little
-    // more visibility than before. Shape/height is unchanged; this affects
-    // only the color drawn inside the existing waveform geometry.
+    // Keep amplitude encoded in brightness. Shape/height is unchanged; this
+    // affects only the color drawn inside the existing waveform geometry.
     const float brightness =
         0.20f + 0.80f * std::pow(clamp01(peak), 0.45f);
 
