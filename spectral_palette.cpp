@@ -14,11 +14,10 @@ rgb_color color_for_point(const waveform_point& p) {
     const float high_raw = p.treble / 255.0f;
     const float peak = p.peak / 65535.0f;
 
-    // The analyzer deliberately log-compresses each band so quiet spectral
-    // detail survives in the cache. That is useful for analysis, but a direct
-    // linear RGB mix makes most full-range music converge toward the same
-    // pastel color. Re-expand the differences here so the dominant frequency
-    // region is immediately obvious, like a DJ waveform.
+    // Analyzer V2 stores normalized spectral shares, so these values now carry
+    // real bass/mid/treble dominance instead of three independently saturated
+    // loudness values. Add one more contrast curve at draw time so the dominant
+    // frequency region is immediately obvious, like a DJ waveform.
     //
     // V4 keeps the useful V2/V3 frequency separation but backs off the warm
     // dominance another small step. The goal is a natural DJ-style gradient,

@@ -15,6 +15,9 @@ namespace spectral_waveform {
 namespace {
 
 static constexpr std::uint32_t kCacheVersion = 1;
+// Bump when the analyzer changes the meaning of bass/mids/treble. This changes
+// only waveform cache filenames; transport PCM uses its own preserved hash below.
+static constexpr std::uint32_t kSpectralCacheRevision = 2;
 static constexpr std::uint32_t kStemCacheRevision = 2;
 static constexpr std::uint32_t kTransportCacheVersion = 1;
 static constexpr std::uint32_t kTransportCacheRevision = 1;
@@ -97,6 +100,10 @@ std::uint64_t track_hash(metadb_handle_ptr track) {
 
 std::uint64_t cache_hash_for_track(metadb_handle_ptr track, int mode) {
     auto hash = track_hash(track);
+    // Analyzer V2 stores normalized spectral shares instead of three independently
+    // saturated bands. Give those values a fresh waveform cache namespace so old
+    // V1 graphics cannot be silently reused after installing the component.
+    hash = fnv1a64(&kSpectralCacheRevision, sizeof(kSpectralCacheRevision), hash);
     if (mode == 1 || mode == 2) {
         // Stem waveform revision is independent of the Original waveform cache.
         // Bump this whenever stem-generation semantics change so old stem-only
@@ -161,7 +168,11 @@ bool valid_header(const cache_header& h) {
 }
 
 std::uint64_t transport_hash_for_track(metadb_handle_ptr track) {
-    auto hash = cache_hash_for_track(track, 1);
+    // Keep the transport PCM namespace byte-for-byte compatible with the old
+    // calculation. Spectral analyzer revisions affect waveform colors only and
+    // must not throw away already generated stem transport PCM.
+    auto hash = track_hash(track);
+    hash = fnv1a64(&kStemCacheRevision, sizeof(kStemCacheRevision), hash);
     hash = fnv1a64(&kTransportCacheVersion, sizeof(kTransportCacheVersion), hash);
     hash = fnv1a64(&kTransportCacheRevision, sizeof(kTransportCacheRevision), hash);
     return hash;

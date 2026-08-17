@@ -111,17 +111,39 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
     }
 
     const double total = low + mid + high + 1.0e-20;
-    const double low_n = std::min(1.0, (low / total) * 3.0);
-    const double mid_n = std::min(1.0, (mid / total) * 3.0);
-    const double high_n = std::min(1.0, (high / total) * 3.0);
+
+    // Preserve RELATIVE spectral dominance instead of independently boosting
+    // every active band toward 255. The old *3 + clamp + log compression made
+    // ordinary full-range music look as if bass, mids and treble were all nearly
+    // maximal at once, leaving the palette too little information to distinguish
+    // kicks, vocals and cymbals.
+    //
+    // Mild perceptual compensation keeps the broad mid band from owning almost
+    // every frame and gives short high-frequency transients enough weight to be
+    // visible. After compensation the three stored values are normalized shares;
+    // together they describe one spectral mixture rather than three loudnesses.
+    const double low_share = low / total;
+    const double mid_share = mid / total;
+    const double high_share = high / total;
+
+    const double low_weight = 1.15 * std::pow(low_share, 0.85);
+    const double mid_weight = 0.92 * std::pow(mid_share, 0.90);
+    const double high_weight = 1.30 * std::pow(high_share, 0.78);
+    const double weight_total = low_weight + mid_weight + high_weight + 1.0e-20;
+
+    const auto encode_share = [weight_total](double value) -> std::uint8_t {
+        const double normalized = std::clamp(value / weight_total, 0.0, 1.0);
+        return static_cast<std::uint8_t>(std::lround(normalized * 255.0));
+    };
+
     const double rms = count > 0 ? std::sqrt(sumSquares / static_cast<double>(count)) : 0.0;
 
     waveform_point p;
     p.peak = static_cast<std::uint16_t>(std::lround(std::min(1.0f, peak) * 65535.0f));
     p.rms = static_cast<std::uint16_t>(std::lround(std::min(1.0, rms) * 65535.0));
-    p.bass = compress_energy(low_n);
-    p.mids = compress_energy(mid_n);
-    p.treble = compress_energy(high_n);
+    p.bass = encode_share(low_weight);
+    p.mids = encode_share(mid_weight);
+    p.treble = encode_share(high_weight);
     m_points.push_back(p);
 }
 

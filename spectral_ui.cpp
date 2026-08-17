@@ -1024,9 +1024,21 @@ private:
             m_viewSpan = newSpan;
             m_viewStart = anchor - cursorX * m_viewSpan;
             clamp_view();
-            m_followPlayhead = true;
             SetFocus(m_wnd);
-            recenter_on_playhead();
+
+            // A stopped track has no authoritative playhead. Previously we still
+            // called recenter_on_playhead(), which returned without invalidating,
+            // so the zoom state changed internally but the display did not repaint
+            // until Play was pressed. When playback is stopped, keep the mouse
+            // cursor as the zoom anchor and repaint immediately. During playback
+            // retain the existing centered-follow behavior.
+            double playPosition = 0.0;
+            if (playback_fraction(playPosition)) {
+                m_followPlayhead = true;
+                recenter_on_playhead();
+            } else {
+                invalidate_all();
+            }
             return;
         }
         invalidate_all();
