@@ -1,0 +1,271 @@
+name: Build Spectral Waveform status overlay v4
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ agent/stem-status-overlay ]
+    paths:
+      - '.github/workflows/build-status-overlay-v4.yml'
+      - 'status-overlay-v4-trigger.txt'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Record run id for chat handoff
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force deliverables | Out-Null
+          Set-Content deliverables\status-overlay-v4-run-id.txt "$env:GITHUB_RUN_ID" -Encoding ascii
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deliverables/status-overlay-v4-run-id.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Record status overlay v4 run [skip ci]"
+            git push origin HEAD:agent/stem-status-overlay
+          }
+
+      - name: Apply existing status overlay patches
+        shell: pwsh
+        run: |
+          function Invoke-WorkflowRunBlock([string]$path, [string]$stepName) {
+            $workflow = Get-Content $path
+            $nameLine = "      - name: $stepName"
+            $nameIndex = -1
+            for ($i = 0; $i -lt $workflow.Count; ++$i) {
+              if ($workflow[$i] -eq $nameLine) { $nameIndex = $i; break }
+            }
+            if ($nameIndex -lt 0) { throw "Workflow step not found: $stepName" }
+
+            $runIndex = -1
+            for ($i = $nameIndex + 1; $i -lt $workflow.Count; ++$i) {
+              if ($workflow[$i] -eq '        run: |') { $runIndex = $i; break }
+            }
+            if ($runIndex -lt 0) { throw "Run block not found: $stepName" }
+
+            $script = New-Object System.Collections.Generic.List[string]
+            for ($i = $runIndex + 1; $i -lt $workflow.Count; ++$i) {
+              $line = $workflow[$i]
+              if ($line -match '^      - name: ') { break }
+              if ($line.StartsWith('          ')) {
+                $script.Add($line.Substring(10))
+              } elseif ($line.Trim().Length -eq 0) {
+                $script.Add('')
+              } else {
+                throw "Unexpected indentation while extracting $stepName : $line"
+              }
+            }
+            if ($script.Count -lt 5) { throw "Extracted run block was unexpectedly short: $stepName" }
+            $temp = Join-Path $env:RUNNER_TEMP (([guid]::NewGuid().ToString()) + '.ps1')
+            Set-Content $temp $script -Encoding UTF8
+            & $temp
+          }
+
+          Invoke-WorkflowRunBlock '.github\workflows\build-native.yml' 'Patch progressive analysis status and overlay'
+          Invoke-WorkflowRunBlock '.github\workflows\build-status-overlay-v3.yml' 'Fix overlay flicker and hide background precache'
+
+      - name: Compose complete frame off-screen
+        shell: pwsh
+        run: |
+          $nl = [Environment]::NewLine
+          $uiPath = "$env:GITHUB_WORKSPACE\spectral_ui.cpp"
+          $ui = Get-Content $uiPath -Raw
+
+          $destructorOld = @(
+            '    ~spectral_waveform_instance() {',
+            '        stop_analysis();',
+            '        release_back_buffer();'
+          ) -join $nl
+          $destructorNew = @(
+            '    ~spectral_waveform_instance() {',
+            '        stop_analysis();',
+            '        release_back_buffer();',
+            '        release_present_buffer();'
+          ) -join $nl
+          if (-not $ui.Contains($destructorOld)) { throw 'Destructor insertion point not found.' }
+          $ui = $ui.Replace($destructorOld, $destructorNew)
+
+          $releaseMarker = '    void release_back_buffer() {'
+          if (-not $ui.Contains($releaseMarker)) { throw 'Back-buffer helper insertion point not found.' }
+          $presentHelpers = @(
+            '    void release_present_buffer() {',
+            '        if (m_presentDC != nullptr) {',
+            '            if (m_presentOldBitmap != nullptr) SelectObject(m_presentDC, m_presentOldBitmap);',
+            '            m_presentOldBitmap = nullptr;',
+            '            if (m_presentBitmap != nullptr) DeleteObject(m_presentBitmap);',
+            '            m_presentBitmap = nullptr;',
+            '            DeleteDC(m_presentDC);',
+            '            m_presentDC = nullptr;',
+            '        }',
+            '        m_presentWidth = 0;',
+            '        m_presentHeight = 0;',
+            '    }',
+            '',
+            '    bool ensure_present_buffer(HDC referenceDC, int width, int height) {',
+            '        if (width <= 0 || height <= 0) return false;',
+            '        if (m_presentDC != nullptr && m_presentWidth == width && m_presentHeight == height) return true;',
+            '',
+            '        release_present_buffer();',
+            '        m_presentDC = CreateCompatibleDC(referenceDC);',
+            '        if (m_presentDC == nullptr) return false;',
+            '        m_presentBitmap = CreateCompatibleBitmap(referenceDC, width, height);',
+            '        if (m_presentBitmap == nullptr) {',
+            '            release_present_buffer();',
+            '            return false;',
+            '        }',
+            '        m_presentOldBitmap = SelectObject(m_presentDC, m_presentBitmap);',
+            '        m_presentWidth = width;',
+            '        m_presentHeight = height;',
+            '        return true;',
+            '    }',
+            '',
+            $releaseMarker
+          ) -join $nl
+          $ui = $ui.Replace($releaseMarker, $presentHelpers)
+
+          $paintPattern = '(?s)    void paint\(\) \{.*?\r?\n    \}\r?\n\r?\n    void seek_from_x\(int x\) \{'
+          if ([regex]::Matches($ui, $paintPattern).Count -ne 1) { throw 'paint() replacement range not found uniquely.' }
+          $paintReplacement = @(
+            '    void paint() {',
+            '        PAINTSTRUCT ps{};',
+            '        HDC dc = BeginPaint(m_wnd, &ps);',
+            '        if (dc == nullptr) return;',
+            '',
+            '        RECT rc{};',
+            '        GetClientRect(m_wnd, &rc);',
+            '        const int width = std::max(0L, rc.right - rc.left);',
+            '        const int height = std::max(0L, rc.bottom - rc.top);',
+            '        const auto waveform = waveform_snapshot();',
+            '',
+            '        if (width > 0 && height > 0 &&',
+            '            ensure_back_buffer(dc, width, height) &&',
+            '            ensure_present_buffer(dc, width, height)) {',
+            '            if (waveform && !waveform->points.empty()) {',
+            '                if (!scroll_waveform_buffer(*waveform, width, height)) {',
+            '                    rebuild_waveform_buffer(*waveform, width, height);',
+            '                }',
+            '',
+            '                const int liveX = current_playhead_x(width);',
+            '                if (liveX >= 0) {',
+            '                    render_columns(m_waveDC, *waveform,',
+            '                        std::max(0, liveX - kLiveRefreshBehind),',
+            '                        std::min(width, liveX + kLiveRefreshAhead),',
+            '                        width, height);',
+            '                }',
+            '            } else {',
+            '                clear_columns(m_waveDC, 0, width, height);',
+            '                if (m_analyzing.load()) draw_status_text(m_waveDC, rc, L"Analyzing waveform...");',
+            '                m_bufferViewStart = m_viewStart;',
+            '                m_bufferViewSpan = m_viewSpan;',
+            '                m_bufferValid = true;',
+            '            }',
+            '',
+            '            // Compose the complete visible frame in memory. Nothing is',
+            '            // written to the real window until waveform, ruler, playhead',
+            '            // and overlays are all present, preventing a waveform-only flash.',
+            '            BitBlt(m_presentDC, 0, 0, width, height, m_waveDC, 0, 0, SRCCOPY);',
+            '',
+            '            if (g_showTimeMarkers.get() && waveform && waveform->duration_seconds > 0.0) {',
+            '                draw_time_ruler(m_presentDC, width, height, waveform->duration_seconds);',
+            '            }',
+            '            const int playX = current_playhead_x(width);',
+            '            if (playX >= 0) {',
+            '                const COLORREF accent = query_color(ui_color_highlight, COLOR_HIGHLIGHT);',
+            '                HPEN pen = CreatePen(PS_SOLID, 2, accent);',
+            '                HGDIOBJ old = SelectObject(m_presentDC, pen);',
+            '                MoveToEx(m_presentDC, playX, 0, nullptr);',
+            '                LineTo(m_presentDC, playX, height);',
+            '                SelectObject(m_presentDC, old);',
+            '                DeleteObject(pen);',
+            '                m_lastPlayX = playX;',
+            '            }',
+            '            draw_view_overlay(m_presentDC, width, height);',
+            '            draw_processing_overlay(m_presentDC, width, height);',
+            '',
+            '            const int paintWidth = std::max(0L, ps.rcPaint.right - ps.rcPaint.left);',
+            '            const int paintHeight = std::max(0L, ps.rcPaint.bottom - ps.rcPaint.top);',
+            '            if (paintWidth > 0 && paintHeight > 0) {',
+            '                BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, paintWidth, paintHeight,',
+            '                    m_presentDC, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);',
+            '            }',
+            '        } else {',
+            '            HBRUSH bg = CreateSolidBrush(query_color(ui_color_background, COLOR_WINDOW));',
+            '            FillRect(dc, &ps.rcPaint, bg);',
+            '            DeleteObject(bg);',
+            '        }',
+            '',
+            '        EndPaint(m_wnd, &ps);',
+            '    }',
+            '',
+            '    void seek_from_x(int x) {'
+          ) -join $nl
+          $ui = [regex]::Replace($ui, $paintPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $paintReplacement }, 1)
+
+          $memberMarker = '    HDC m_waveDC = nullptr;'
+          if (-not $ui.Contains($memberMarker)) { throw 'Presentation-buffer member insertion point not found.' }
+          $presentMembers = @(
+            '    HDC m_presentDC = nullptr;',
+            '    HBITMAP m_presentBitmap = nullptr;',
+            '    HGDIOBJ m_presentOldBitmap = nullptr;',
+            '    int m_presentWidth = 0;',
+            '    int m_presentHeight = 0;',
+            '',
+            $memberMarker
+          ) -join $nl
+          $ui = $ui.Replace($memberMarker, $presentMembers)
+
+          Set-Content $uiPath $ui -Encoding UTF8
+          Select-String -Path $uiPath -Pattern 'ensure_present_buffer|m_presentDC|Compose the complete visible frame' -Context 1,2
+
+      - name: Get foobar2000 SDK
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/reupen/foobar2000-sdk-unmodified.git sdk
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build PFC
+        shell: pwsh
+        run: |
+          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\x64\Release\"
+
+      - name: Build foobar2000 SDK
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\x64\Release\"
+
+      - name: Build component client
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\x64\Release\"
+
+      - name: Build foo_spectral_waveform
+        shell: pwsh
+        run: |
+          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:BuildProjectReferences=false
+
+      - name: Package status overlay v4 test component
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) { throw "Built DLL not found." }
+          New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
+          Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
+          7z a -tzip foo_spectral_waveform-status-overlay-v4.zip ".\stage\x64\foo_spectral_waveform.dll"
+          Rename-Item foo_spectral_waveform-status-overlay-v4.zip foo_spectral_waveform-status-overlay-v4.fb2k-component
+
+      - name: Upload status overlay v4 test component
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_spectral_waveform-status-overlay-v4
+          path: foo_spectral_waveform-status-overlay-v4.fb2k-component
+          if-no-files-found: error
