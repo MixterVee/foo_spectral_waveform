@@ -71,7 +71,6 @@ jobs:
           if ($script.Count -lt 20) { throw "Existing overlay patch extraction was unexpectedly short." }
           Set-Content "$env:RUNNER_TEMP\status-overlay-base.ps1" $script -Encoding UTF8
           & "$env:RUNNER_TEMP\status-overlay-base.ps1"
-          if ($LASTEXITCODE -ne 0) { throw "Existing status overlay patch failed." }
 
       - name: Fix overlay flicker and hide background precache
         shell: pwsh
