@@ -323,8 +323,6 @@ private:
     }
 
     void reset_view() {
-        if (reverse_active()) end_reverse_transport();
-        if (m_touchHoldLatched && !m_dragging) release_touch_hold();
         m_releaseGlideActive = false;
         m_viewStart = 0.0;
         m_viewSpan = 1.0;
@@ -381,10 +379,7 @@ private:
 
     bool touch_hold_can_start() const {
         auto pc = playback_control::get();
-        return m_followPlayhead &&
-            m_followMode == follow_mode::centered &&
-            m_viewSpan < 0.9995 &&
-            pc->is_playing() &&
+        return pc->is_playing() &&
             !pc->is_paused() &&
             pc->playback_can_seek();
     }
@@ -1303,10 +1298,7 @@ private:
 
         double positionFrac = 0.0;
         auto pc = playback_control::get();
-        if (m_followPlayhead &&
-            m_followMode == follow_mode::centered &&
-            m_viewSpan < 0.9995 &&
-            pc->is_playing() &&
+        if (pc->is_playing() &&
             pc->playback_can_seek() &&
             playback_fraction(positionFrac)) {
 
@@ -1344,7 +1336,8 @@ private:
             m_dragMoved = true;
             if (!m_centerScrubbing) m_followPlayhead = false;
         }
-        if (!m_dragMoved || m_viewSpan >= 0.9995) return;
+        if (!m_dragMoved) return;
+        if (m_viewSpan >= 0.9995 && !m_centerScrubbing) return;
 
         if (m_centerScrubbing) {
             // Grab the waveform itself: dragging right moves earlier audio under
@@ -2098,3 +2091,4 @@ public:
 static service_factory_single_t<spectral_waveform_element> g_spectral_waveform_element_factory;
 
 } // namespace
+
