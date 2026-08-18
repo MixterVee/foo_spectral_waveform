@@ -44,7 +44,7 @@ jobs:
               if ($line -match '^      - name: ') { break }
               if ($line.StartsWith('          ')) { $script.Add($line.Substring(10)) }
               elseif ($line.Trim().Length -eq 0) { $script.Add('') }
-              else { throw "Unexpected indentation in $stepName: $line" }
+              else { throw "Unexpected indentation in ${stepName}: $line" }
             }
             $temp = Join-Path $env:RUNNER_TEMP (([guid]::NewGuid().ToString()) + '.ps1')
             Set-Content $temp $script -Encoding UTF8
