@@ -1,14 +1,8 @@
-name: Promote waveform benchmark menu stable
+name: Build Native foo_spectral_waveform
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - '.tmp-placeholder'
-
-permissions:
-  contents: write
-  issues: write
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,73 +11,6 @@ jobs:
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
-
-      - name: Record run id for chat handoff
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api "repos/${{ github.repository }}/issues/3/comments" -f "body=RUN_ID=$env:GITHUB_RUN_ID"
-
-      - name: Make benchmark menu entry permanent
-        shell: pwsh
-        run: |
-          $path = "$env:GITHUB_WORKSPACE\spectral_ui.cpp"
-          $text = Get-Content $path -Raw
-          $nl = [Environment]::NewLine
-
-          if (-not $text.Contains('kStemBenchmark')) {
-            $oldEnum = @(
-              '    kStemSaveInstrumentalMp3,',
-              '    kStemPrecache,',
-              '    kStemCommandCount'
-            ) -join $nl
-            $newEnum = @(
-              '    kStemSaveInstrumentalMp3,',
-              '    kStemPrecache,',
-              '    kStemBenchmark,',
-              '    kStemCommandCount'
-            ) -join $nl
-            if (-not $text.Contains($oldEnum)) { throw "Stem command enum insertion point not found." }
-            $text = $text.Replace($oldEnum, $newEnum)
-
-            $oldGuid = @(
-              '    {0xa92a1007,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x07}},',
-              '    {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}}'
-            ) -join $nl
-            $newGuid = @(
-              '    {0xa92a1007,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x07}},',
-              '    {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}},',
-              '    {0xa92a1010,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x10}}'
-            ) -join $nl
-            if (-not $text.Contains($oldGuid)) { throw "Stem command GUID insertion point not found." }
-            $text = $text.Replace($oldGuid, $newGuid)
-
-            $oldMenu = '            addStem(kStemPrecache, L"Pre-cache at track start");'
-            $newMenu = @(
-              $oldMenu,
-              '            AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);',
-              '            addStem(kStemBenchmark, L"Benchmark / Select Processing Backend...");'
-            ) -join $nl
-            if (-not $text.Contains($oldMenu)) { throw "Stem submenu insertion point not found." }
-            $text = $text.Replace($oldMenu, $newMenu)
-
-            Set-Content -Path $path -Value $text -Encoding UTF8
-          }
-
-          Select-String -Path $path -Pattern 'kStemBenchmark|Benchmark / Select Processing Backend' -Context 1,2
-
-      - name: Commit permanent source change
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add spectral_ui.cpp
-          git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "Add Stem Separator benchmark to waveform menu [skip ci]"
-            git push origin HEAD:main
-          }
 
       - name: Get foobar2000 SDK
         shell: pwsh
@@ -113,18 +40,29 @@ jobs:
         run: |
           msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:BuildProjectReferences=false
 
-      - name: Package stable component
+      - name: Package fb2k-component
         shell: pwsh
         run: |
-          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) { throw "Built DLL not found." }
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) {
+            throw "Built DLL not found."
+          }
+
           New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
           Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
-          7z a -tzip foo_spectral_waveform-stable.zip ".\stage\x64\foo_spectral_waveform.dll"
-          Rename-Item foo_spectral_waveform-stable.zip foo_spectral_waveform-stable.fb2k-component
 
-      - name: Upload stable component
+          if (Test-Path "foo_spectral_waveform.zip") {
+            Remove-Item "foo_spectral_waveform.zip" -Force
+          }
+
+          if (Test-Path "foo_spectral_waveform.fb2k-component") {
+            Remove-Item "foo_spectral_waveform.fb2k-component" -Force
+          }
+
+          7z a -tzip foo_spectral_waveform.zip ".\stage\x64\foo_spectral_waveform.dll"
+          Rename-Item foo_spectral_waveform.zip foo_spectral_waveform.fb2k-component
+
+      - name: Upload component
         uses: actions/upload-artifact@v4
         with:
-          name: foo_spectral_waveform-stable
-          path: foo_spectral_waveform-stable.fb2k-component
-          if-no-files-found: error
+          name: foo_spectral_waveform-native-x64
+          path: foo_spectral_waveform.fb2k-component
