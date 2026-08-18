@@ -1,0 +1,162 @@
+name: Build Spectral Waveform status overlay v3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ agent/stem-status-overlay ]
+    paths:
+      - '.github/workflows/build-status-overlay-v3.yml'
+      - 'status-overlay-v3-trigger.txt'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Record run id for chat handoff
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force deliverables | Out-Null
+          Set-Content deliverables\status-overlay-v3-run-id.txt "$env:GITHUB_RUN_ID" -Encoding ascii
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deliverables/status-overlay-v3-run-id.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Record status overlay v3 run [skip ci]"
+            git push origin HEAD:agent/stem-status-overlay
+          }
+
+      - name: Apply existing status overlay patch
+        shell: pwsh
+        run: |
+          $workflow = Get-Content ".github\workflows\build-native.yml"
+          $nameIndex = -1
+          for ($i = 0; $i -lt $workflow.Count; ++$i) {
+            if ($workflow[$i] -eq '      - name: Patch progressive analysis status and overlay') {
+              $nameIndex = $i
+              break
+            }
+          }
+          if ($nameIndex -lt 0) { throw "Existing status overlay patch step not found." }
+
+          $runIndex = -1
+          for ($i = $nameIndex + 1; $i -lt $workflow.Count; ++$i) {
+            if ($workflow[$i] -eq '        run: |') {
+              $runIndex = $i
+              break
+            }
+          }
+          if ($runIndex -lt 0) { throw "Existing status overlay run block not found." }
+
+          $script = New-Object System.Collections.Generic.List[string]
+          for ($i = $runIndex + 1; $i -lt $workflow.Count; ++$i) {
+            $line = $workflow[$i]
+            if ($line -match '^      - name: ') { break }
+            if ($line.StartsWith('          ')) {
+              $script.Add($line.Substring(10))
+            } elseif ($line.Trim().Length -eq 0) {
+              $script.Add('')
+            } else {
+              throw "Unexpected indentation while extracting existing patch: $line"
+            }
+          }
+          if ($script.Count -lt 20) { throw "Existing overlay patch extraction was unexpectedly short." }
+          Set-Content "$env:RUNNER_TEMP\status-overlay-base.ps1" $script -Encoding UTF8
+          & "$env:RUNNER_TEMP\status-overlay-base.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "Existing status overlay patch failed." }
+
+      - name: Fix overlay flicker and hide background precache
+        shell: pwsh
+        run: |
+          $nl = [Environment]::NewLine
+
+          # Progressive stem preview publication used a fake WM_SIZE message to
+          # invalidate the waveform bitmap. That causes a resize-style full redraw
+          # and can expose one frame containing the waveform without its overlays.
+          # Use the UI's existing analysis-ready refresh message instead.
+          $capturePath = "$env:GITHUB_WORKSPACE\live_output_capture.cpp"
+          $capture = Get-Content $capturePath -Raw
+          $oldRefresh = 'PostMessageW(wnd, WM_SIZE, 0, 0);'
+          if (-not $capture.Contains($oldRefresh)) { throw "Legacy WM_SIZE refresh site not found." }
+          $capture = $capture.Replace($oldRefresh, 'PostMessageW(wnd, WM_APP + 0x351, 0, 0);')
+          $capture = $capture.Replace(
+            '// The waveform''s WM_SIZE handler discards its cached bitmap and' + $nl +
+            '                // schedules a full repaint. The actual size is unchanged.',
+            '// Refresh the waveform cache through the normal analysis-ready path.' + $nl +
+            '                // Avoid a fake WM_SIZE, which can visibly blank overlays for one frame.')
+          Set-Content $capturePath $capture -Encoding UTF8
+
+          # Routine background pre-cache is intentionally quiet. The status badge
+          # starts when Vocals/Instrumental is selected, where progress/backend is
+          # useful, or when the stem status itself needs attention.
+          $uiPath = "$env:GITHUB_WORKSPACE\spectral_ui.cpp"
+          $ui = Get-Content $uiPath -Raw
+          $labelLine = '        std::wstring label = mode == 1 ? L"Vocals" : (mode == 2 ? L"Instrumental" : L"Original");'
+          if (-not $ui.Contains($labelLine)) { throw "Status label insertion point not found." }
+          $ui = $ui.Replace($labelLine, $labelLine + $nl + '        if (mode == 0) return;')
+
+          # Do not schedule the extra status-only repaint while Original is selected.
+          $oldInvalidate = '            invalidate_processing_status();'
+          $newInvalidate = @(
+            '            if (spectral_waveform::live_output_capture::analysis_status().mode != 0) {',
+            '                invalidate_processing_status();',
+            '            }'
+          ) -join $nl
+          if (-not $ui.Contains($oldInvalidate)) { throw "Status timer invalidation site not found." }
+          $ui = $ui.Replace($oldInvalidate, $newInvalidate)
+          Set-Content $uiPath $ui -Encoding UTF8
+
+          Select-String -Path $capturePath -Pattern 'WM_APP \+ 0x351' -Context 2,2
+          Select-String -Path $uiPath -Pattern 'mode == 0\) return|analysis_status\(\)\.mode' -Context 1,2
+
+      - name: Get foobar2000 SDK
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/reupen/foobar2000-sdk-unmodified.git sdk
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build PFC
+        shell: pwsh
+        run: |
+          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\x64\Release\"
+
+      - name: Build foobar2000 SDK
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\x64\Release\"
+
+      - name: Build component client
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\x64\Release\"
+
+      - name: Build foo_spectral_waveform
+        shell: pwsh
+        run: |
+          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:BuildProjectReferences=false
+
+      - name: Package status overlay v3 test component
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) { throw "Built DLL not found." }
+          New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
+          Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
+          7z a -tzip foo_spectral_waveform-status-overlay-v3.zip ".\stage\x64\foo_spectral_waveform.dll"
+          Rename-Item foo_spectral_waveform-status-overlay-v3.zip foo_spectral_waveform-status-overlay-v3.fb2k-component
+
+      - name: Upload status overlay v3 test component
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_spectral_waveform-status-overlay-v3
+          path: foo_spectral_waveform-status-overlay-v3.fb2k-component
+          if-no-files-found: error
