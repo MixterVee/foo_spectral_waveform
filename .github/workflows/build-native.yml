@@ -5,7 +5,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  issues: write
   actions: read
 
 jobs:
@@ -13,22 +14,15 @@ jobs:
     runs-on: windows-2022
 
     steps:
+      - name: Record run id in handoff issue
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/1/comments" -f "body=RUN_ID=$env:GITHUB_RUN_ID"
+
       - name: Checkout project
         uses: actions/checkout@v4
-
-      - name: Record test run id
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force deliverables | Out-Null
-          Set-Content deliverables\waveform-benchmark-menu-run-id.txt "$env:GITHUB_RUN_ID" -Encoding ascii
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add deliverables/waveform-benchmark-menu-run-id.txt
-          git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "Record waveform benchmark menu test run [skip ci]"
-            git push origin HEAD:main
-          }
 
       - name: Add Stem Separator benchmark to waveform menu
         shell: pwsh
@@ -106,10 +100,9 @@ jobs:
           7z a -tzip foo_spectral_waveform-benchmark-menu.zip ".\stage\x64\foo_spectral_waveform.dll"
           Rename-Item foo_spectral_waveform-benchmark-menu.zip foo_spectral_waveform-benchmark-menu.fb2k-component
 
-      - name: Publish test component
-        shell: pwsh
-        run: |
-          Copy-Item foo_spectral_waveform-benchmark-menu.fb2k-component deliverables\foo_spectral_waveform-benchmark-menu.fb2k-component -Force
-          git add deliverables/foo_spectral_waveform-benchmark-menu.fb2k-component
-          git commit -m "Publish waveform benchmark menu test component [skip ci]"
-          git push origin HEAD:main
+      - name: Upload component
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_spectral_waveform-benchmark-menu
+          path: foo_spectral_waveform-benchmark-menu.fb2k-component
+          if-no-files-found: error
