@@ -42,9 +42,9 @@ void invalidate_waveform_windows() {
             wchar_t className[128]{};
             if (GetClassNameW(wnd, className, _countof(className)) > 0 &&
                 wcscmp(className, kWaveformWindowClass) == 0) {
-                // The waveform's WM_SIZE handler discards its cached bitmap and
-                // schedules a full repaint. The actual size is unchanged.
-                PostMessageW(wnd, WM_SIZE, 0, 0);
+                // Refresh the waveform cache through the normal analysis-ready path.
+                // Avoid a fake WM_SIZE, which can visibly blank overlays for one frame.
+                PostMessageW(wnd, WM_APP + 0x351, 0, 0);
             }
             return TRUE;
         }, 0);
@@ -233,7 +233,22 @@ public:
         m_ready = false;
     }
 
+    stem_analysis_status status() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        stem_analysis_status out;
+        out.mode = (m_mode == 1 || m_mode == 2) ? m_mode : 0;
+        out.active = m_analysisActive || m_hasRequest;
+        out.ready = m_ready;
+        out.progress_percent = m_ready ? 100 : std::clamp(m_analysisProgress, 0, 100);
+        return out;
+    }
+
 private:
+    void set_progress(std::uint64_t generation, int percent) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (generation == m_generation) m_analysisProgress = std::clamp(percent, 0, 100);
+    }
+
     bool is_current(std::uint64_t generation) {
         std::lock_guard<std::mutex> lock(m_mutex);
         return !m_stop && generation == m_generation;
@@ -309,15 +324,24 @@ private:
                             // user was already seeing instead of appearing abruptly.
                             publish_previews(original, original, false);
 
+                            const unsigned totalBlocks = std::max(1u, static_cast<unsigned>(
+                                std::ceil(std::max(0.001, original.duration_seconds) / 5.0)));
+                            unsigned completedBlocks = 0;
+                            set_progress(generation, 0);
+
                             const bool analyzed = analyze_stems_progressive(
                                 track,
                                 original,
                                 prioritySeconds,
                                 *aborter,
-                                [this, generation, aborter](
+                                [this, generation, aborter, &completedBlocks, totalBlocks](
                                     const waveform_data& vocals,
                                     const waveform_data& instrumental) {
                                     if (aborter->is_aborting() || !is_current(generation)) return;
+                                    ++completedBlocks;
+                                    const int percent = static_cast<int>(std::min(100u,
+                                        (completedBlocks * 100u) / totalBlocks));
+                                    set_progress(generation, percent);
                                     publish_previews(vocals, instrumental, true);
                                 },
                                 vocalsFinal,
@@ -349,6 +373,7 @@ private:
                     m_analysisActive = false;
                     if (completed) {
                         m_ready = true;
+                        m_analysisProgress = 100;
                     } else if (!allowAnalysis && m_mode > 0 && m_mode <= 2 && !m_hasRequest) {
                         // The user can select Vocals/Instrumental while a cheap
                         // cache-only probe is still running. Promote that same
@@ -373,6 +398,7 @@ private:
     bool m_queuedAllowAnalysis = false;
     bool m_analysisActive = false;
     bool m_ready = false;
+    int m_analysisProgress = 0;
     std::uint64_t m_generation = 0;
     metadb_handle_ptr m_track;
     int m_mode = -1;
@@ -587,6 +613,14 @@ bool animation_active() {
     return GetTickCount64() - g_previewFadeStart < kPreviewFadeMs;
 }
 
+stem_analysis_status analysis_status() {
+    if (g_manager) return g_manager->status();
+    stem_analysis_status out;
+    std::lock_guard<std::mutex> lock(g_previewMutex);
+    out.mode = (g_selectedMode == 1 || g_selectedMode == 2) ? g_selectedMode : 0;
+    return out;
+}
+
 void refresh_mode() {
     if (g_observer) g_observer->refresh_now();
 }
@@ -598,3 +632,5 @@ void reset() {
 }
 
 } // namespace spectral_waveform::live_output_capture
+
+

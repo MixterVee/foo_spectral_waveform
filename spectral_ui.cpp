@@ -20,11 +20,15 @@
 #include "live_output_capture.h"
 #include "stem_waveform_analysis.h"
 #include "stem_transport_service.h"
+#include "stem_processing_status_service.h"
 
 #undef FOOGUIDDECL
 #define FOOGUIDDECL
 FOOGUIDDECL const GUID stem_transport_service::class_guid =
 { 0x3f42b0c7, 0x8df1, 0x4fb9, { 0xa6, 0x7d, 0x21, 0x55, 0x91, 0xc8, 0x43, 0x6e } };
+
+FOOGUIDDECL const GUID stem_processing_status_service::class_guid =
+{ 0x7a9c0b21, 0x10c5, 0x4d31, { 0xa9, 0x2e, 0x64, 0x1b, 0x2f, 0x8c, 0x51, 0x73 } };
 
 namespace {
 
@@ -93,6 +97,13 @@ stem_transport_service::ptr find_transport_service() {
     return service;
 }
 
+stem_processing_status_service::ptr find_processing_status_service() {
+    stem_processing_status_service::ptr service;
+    auto e = stem_processing_status_service::enumerate();
+    if (!e.first(service)) service.release();
+    return service;
+}
+
 std::wstring utf8_menu_text(const char* text) {
     if (text == nullptr || *text == 0) return {};
     const int count = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
@@ -146,6 +157,7 @@ public:
     ~spectral_waveform_instance() {
         stop_analysis();
         release_back_buffer();
+        release_present_buffer();
         if (m_wnd != nullptr) {
             KillTimer(m_wnd, 1);
             DestroyWindow(m_wnd);
@@ -213,6 +225,9 @@ private:
             bool viewChanged = update_reverse_release_visual_clock();
             if (!viewChanged) viewChanged = update_release_glide();
             if (!viewChanged) viewChanged = update_follow_view();
+            if (spectral_waveform::live_output_capture::analysis_status().mode != 0) {
+                invalidate_processing_status();
+            }
             if (spectral_waveform::live_output_capture::animation_active()) {
                 // Progressive stem blocks dissolve into place for a few frames.
                 // Rebuild the bitmap only while that short visual transition runs.
@@ -973,6 +988,14 @@ private:
         return static_cast<int>(visibleFrac * std::max(0, width - 1));
     }
 
+    void invalidate_processing_status() {
+        if (m_wnd == nullptr) return;
+        RECT rc{};
+        GetClientRect(m_wnd, &rc);
+        RECT statusRc{0, 0, std::min<LONG>(rc.right, 720L), std::min<LONG>(rc.bottom, 44L)};
+        InvalidateRect(m_wnd, &statusRc, FALSE);
+    }
+
     void invalidate_playhead() {
         if (m_wnd == nullptr) return;
         RECT rc{};
@@ -1551,6 +1574,82 @@ private:
         DrawTextW(dc, label, -1, &textRc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
+    void draw_processing_overlay(HDC dc, int width, int height) const {
+        if (dc == nullptr || width < 120 || height < 24) return;
+
+        const auto analysis = spectral_waveform::live_output_capture::analysis_status();
+        const int mode = analysis.mode;
+        std::wstring label = mode == 1 ? L"Vocals" : (mode == 2 ? L"Instrumental" : L"Original");
+        if (mode == 0) return;
+
+        stem_processing_status backend{};
+        bool haveBackend = false;
+        auto service = find_processing_status_service();
+        if (!service.is_empty()) {
+            try { haveBackend = service->get_status(backend); } catch (...) { haveBackend = false; }
+        }
+
+        std::wstring backendName;
+        if (haveBackend && backend.engine_ready) {
+            if (backend.cpu_fallback) {
+                backendName = L"CPU fallback";
+            } else if (backend.backend_label[0] != 0) {
+                backendName = backend.backend_label;
+                const size_t split = backendName.find(L" - ");
+                if (split != std::wstring::npos) backendName.erase(0, split + 3);
+            } else if (backend.backend_type == stem_processing_backend_cpu) {
+                backendName = L"CPU";
+            }
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        if (haveBackend && backend.processing) m_processingDisplayUntil = now + 1500;
+        const bool recentProcessing = m_processingDisplayUntil != 0 && now < m_processingDisplayUntil;
+
+        if (mode == 0) {
+            if (!backendName.empty()) label += L"  |  " + backendName;
+            if (haveBackend && backend.engine_ready) {
+                label += (backend.processing || recentProcessing)
+                    ? L"  |  Pre-caching..."
+                    : L"  |  Ready";
+            }
+        } else {
+            if (!backendName.empty()) label += L"  |  " + backendName;
+            else if (analysis.active) label += L"  |  Backend starting...";
+
+            if (analysis.active) {
+                wchar_t progress[48]{};
+                swprintf_s(progress, L"  |  Processing %d%%", std::clamp(analysis.progress_percent, 0, 100));
+                label += progress;
+            } else if (analysis.ready) {
+                label += L"  |  Ready";
+            } else {
+                label += L"  |  Preparing...";
+            }
+        }
+
+        SIZE textSize{};
+        if (!GetTextExtentPoint32W(dc, label.c_str(), static_cast<int>(label.size()), &textSize)) return;
+        const int padX = 6;
+        const int padY = 3;
+        const LONG maxRight = std::max<LONG>(40L, static_cast<LONG>(width * 2 / 3));
+        RECT box{6L, 6L, std::min<LONG>(maxRight, 6L + textSize.cx + padX * 2),
+            std::min<LONG>(static_cast<LONG>(height - 4), 6L + textSize.cy + padY * 2)};
+        if (box.right <= box.left || box.bottom <= box.top) return;
+
+        HBRUSH background = CreateSolidBrush(query_color(ui_color_background, COLOR_WINDOW));
+        FillRect(dc, &box, background);
+        DeleteObject(background);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, query_color(ui_color_text, COLOR_WINDOWTEXT));
+        RECT textRc = box;
+        textRc.left += padX;
+        textRc.right -= padX;
+        textRc.top += padY;
+        textRc.bottom -= padY;
+        DrawTextW(dc, label.c_str(), -1, &textRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+
     static COLORREF blend_color(COLORREF foreground, COLORREF background, unsigned foregroundPercent) {
         foregroundPercent = std::min(100u, foregroundPercent);
         const unsigned backgroundPercent = 100u - foregroundPercent;
@@ -1669,6 +1768,37 @@ private:
         SelectObject(dc, oldPen);
     }
 
+    void release_present_buffer() {
+        if (m_presentDC != nullptr) {
+            if (m_presentOldBitmap != nullptr) SelectObject(m_presentDC, m_presentOldBitmap);
+            m_presentOldBitmap = nullptr;
+            if (m_presentBitmap != nullptr) DeleteObject(m_presentBitmap);
+            m_presentBitmap = nullptr;
+            DeleteDC(m_presentDC);
+            m_presentDC = nullptr;
+        }
+        m_presentWidth = 0;
+        m_presentHeight = 0;
+    }
+
+    bool ensure_present_buffer(HDC referenceDC, int width, int height) {
+        if (width <= 0 || height <= 0) return false;
+        if (m_presentDC != nullptr && m_presentWidth == width && m_presentHeight == height) return true;
+
+        release_present_buffer();
+        m_presentDC = CreateCompatibleDC(referenceDC);
+        if (m_presentDC == nullptr) return false;
+        m_presentBitmap = CreateCompatibleBitmap(referenceDC, width, height);
+        if (m_presentBitmap == nullptr) {
+            release_present_buffer();
+            return false;
+        }
+        m_presentOldBitmap = SelectObject(m_presentDC, m_presentBitmap);
+        m_presentWidth = width;
+        m_presentHeight = height;
+        return true;
+    }
+
     void release_back_buffer() {
         if (m_waveDC != nullptr) {
             if (m_waveOldBitmap != nullptr) SelectObject(m_waveDC, m_waveOldBitmap);
@@ -1776,7 +1906,9 @@ private:
         const int height = std::max(0L, rc.bottom - rc.top);
         const auto waveform = waveform_snapshot();
 
-        if (width > 0 && height > 0 && ensure_back_buffer(dc, width, height)) {
+        if (width > 0 && height > 0 &&
+            ensure_back_buffer(dc, width, height) &&
+            ensure_present_buffer(dc, width, height)) {
             if (waveform && !waveform->points.empty()) {
                 if (!scroll_waveform_buffer(*waveform, width, height)) {
                     rebuild_waveform_buffer(*waveform, width, height);
@@ -1797,34 +1929,38 @@ private:
                 m_bufferValid = true;
             }
 
-            const int paintWidth = std::max(0L, ps.rcPaint.right - ps.rcPaint.left);
-            const int paintHeight = std::max(0L, ps.rcPaint.bottom - ps.rcPaint.top);
-            if (paintWidth > 0 && paintHeight > 0) {
-                BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, paintWidth, paintHeight,
-                    m_waveDC, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
-            }
-        } else {
-            HBRUSH bg = CreateSolidBrush(query_color(ui_color_background, COLOR_WINDOW));
-            FillRect(dc, &ps.rcPaint, bg);
-            DeleteObject(bg);
-        }
+            // Compose the complete visible frame in memory. Nothing is
+            // written to the real window until waveform, ruler, playhead
+            // and overlays are all present, preventing a waveform-only flash.
+            BitBlt(m_presentDC, 0, 0, width, height, m_waveDC, 0, 0, SRCCOPY);
 
-        if (width > 0 && height > 0) {
             if (g_showTimeMarkers.get() && waveform && waveform->duration_seconds > 0.0) {
-                draw_time_ruler(dc, width, height, waveform->duration_seconds);
+                draw_time_ruler(m_presentDC, width, height, waveform->duration_seconds);
             }
             const int playX = current_playhead_x(width);
             if (playX >= 0) {
                 const COLORREF accent = query_color(ui_color_highlight, COLOR_HIGHLIGHT);
                 HPEN pen = CreatePen(PS_SOLID, 2, accent);
-                HGDIOBJ old = SelectObject(dc, pen);
-                MoveToEx(dc, playX, 0, nullptr);
-                LineTo(dc, playX, height);
-                SelectObject(dc, old);
+                HGDIOBJ old = SelectObject(m_presentDC, pen);
+                MoveToEx(m_presentDC, playX, 0, nullptr);
+                LineTo(m_presentDC, playX, height);
+                SelectObject(m_presentDC, old);
                 DeleteObject(pen);
                 m_lastPlayX = playX;
             }
-            draw_view_overlay(dc, width, height);
+            draw_view_overlay(m_presentDC, width, height);
+            draw_processing_overlay(m_presentDC, width, height);
+
+            const int paintWidth = std::max(0L, ps.rcPaint.right - ps.rcPaint.left);
+            const int paintHeight = std::max(0L, ps.rcPaint.bottom - ps.rcPaint.top);
+            if (paintWidth > 0 && paintHeight > 0) {
+                BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, paintWidth, paintHeight,
+                    m_presentDC, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+            }
+        } else {
+            HBRUSH bg = CreateSolidBrush(query_color(ui_color_background, COLOR_WINDOW));
+            FillRect(dc, &ps.rcPaint, bg);
+            DeleteObject(bg);
         }
 
         EndPaint(m_wnd, &ps);
@@ -2056,6 +2192,14 @@ private:
     double m_releaseGlideStartView = 0.0;
     double m_releaseGlideTargetPosition = 0.0;
 
+    mutable ULONGLONG m_processingDisplayUntil = 0;
+
+    HDC m_presentDC = nullptr;
+    HBITMAP m_presentBitmap = nullptr;
+    HGDIOBJ m_presentOldBitmap = nullptr;
+    int m_presentWidth = 0;
+    int m_presentHeight = 0;
+
     HDC m_waveDC = nullptr;
     HBITMAP m_waveBitmap = nullptr;
     HGDIOBJ m_waveOldBitmap = nullptr;
@@ -2095,5 +2239,8 @@ public:
 static service_factory_single_t<spectral_waveform_element> g_spectral_waveform_element_factory;
 
 } // namespace
+
+
+
 
 
