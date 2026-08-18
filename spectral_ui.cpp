@@ -70,6 +70,7 @@ enum stem_menu_command : unsigned {
     kStemSaveVocalsMp3,
     kStemSaveInstrumentalMp3,
     kStemPrecache,
+    kStemBenchmark,
     kStemCommandCount
 };
 
@@ -81,7 +82,8 @@ static const GUID kStemCommandGuids[kStemCommandCount] = {
     {0xa92a1005,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x05}},
     {0xa92a1006,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x06}},
     {0xa92a1007,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x07}},
-    {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}}
+    {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}},
+    {0xa92a1010,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x10}}
 };
 
 stem_transport_service::ptr find_transport_service() {
@@ -1188,6 +1190,8 @@ private:
             addStem(kStemSaveInstrumentalMp3, L"Save Instrumental as MP3...");
             AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
             addStem(kStemPrecache, L"Pre-cache at track start");
+            AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
+            addStem(kStemBenchmark, L"Benchmark / Select Processing Backend...");
 
             AppendMenuW(menu, MF_POPUP | (stemAvailable ? 0 : MF_GRAYED),
                 reinterpret_cast<UINT_PTR>(stemMenu), L"Stem Separator");
@@ -2091,4 +2095,5 @@ public:
 static service_factory_single_t<spectral_waveform_element> g_spectral_waveform_element_factory;
 
 } // namespace
+
 
