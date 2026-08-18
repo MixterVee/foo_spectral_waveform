@@ -62,9 +62,18 @@ jobs:
           if ($countDrag -ne 1) { throw "Expected one muted-drag zoom gate; found $countDrag." }
           $text = [regex]::Replace($text, $patternDrag, $replacementDrag, 1)
 
+          # Once a 1X muted grab has started, do not reject movement just because
+          # the entire track is visible. Centered scrub already supports temporary
+          # blank overscroll outside 0:00 / EOF so the waveform has room to move.
+          $patternMove = 'if \(!m_dragMoved \|\| m_viewSpan >= 0\.9995\) return;'
+          $replacementMove = "if (!m_dragMoved) return;${nl}        if (m_viewSpan >= 0.9995 && !m_centerScrubbing) return;"
+          $countMove = [regex]::Matches($text, $patternMove).Count
+          if ($countMove -ne 1) { throw "Expected one 1X update-drag stop; found $countMove." }
+          $text = [regex]::Replace($text, $patternMove, $replacementMove, 1)
+
           Set-Content -Path $path -Value $text -Encoding UTF8
 
-          Select-String -Path $path -Pattern 'bool touch_hold_can_start|Scratch audition is intentionally disabled|void reset_view' -Context 0,8
+          Select-String -Path $path -Pattern 'bool touch_hold_can_start|Scratch audition is intentionally disabled|m_viewSpan >= 0.9995 && !m_centerScrubbing|void reset_view' -Context 0,8
 
       - name: Get foobar2000 SDK
         shell: pwsh
