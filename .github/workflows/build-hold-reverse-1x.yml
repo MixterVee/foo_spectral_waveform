@@ -1,0 +1,112 @@
+name: Build 1X Hold Reverse muted drag test
+
+on:
+  push:
+    branches: [ agent/hold-reverse-1x ]
+    paths:
+      - '.github/workflows/build-hold-reverse-1x.yml'
+      - 'spectral_ui.cpp'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Record run id for chat handoff
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\deliverables" | Out-Null
+          Set-Content "$env:GITHUB_WORKSPACE\deliverables\hold-reverse-1x-run-id.txt" "$env:GITHUB_RUN_ID" -Encoding ascii
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deliverables/hold-reverse-1x-run-id.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Record 1X transport test run id"
+            git push origin HEAD:agent/hold-reverse-1x
+          }
+
+      - name: Enable Hold Reverse and muted drag at 1X
+        shell: pwsh
+        run: |
+          $path = "$env:GITHUB_WORKSPACE\spectral_ui.cpp"
+          $text = Get-Content $path -Raw
+
+          # Fit Track / 1X must not cancel an already active Hold or Reverse.
+          $patternReset = '(?m)^\s*if \(reverse_active\(\)\) end_reverse_transport\(\);\r?\n\s*if \(m_touchHoldLatched && !m_dragging\) release_touch_hold\(\);\r?\n'
+          $countReset = [regex]::Matches($text, $patternReset).Count
+          if ($countReset -ne 1) { throw "Expected one reset_view transport-cancel block; found $countReset." }
+          $text = [regex]::Replace($text, $patternReset, '', 1)
+
+          # Hold and Reverse are transport operations; do not require zoom or Centered Scroll.
+          $patternHold = 'return m_followPlayhead &&\s*m_followMode == follow_mode::centered &&\s*m_viewSpan < 0\.9995 &&\s*pc->is_playing\(\) &&\s*!pc->is_paused\(\) &&\s*pc->playback_can_seek\(\);'
+          $replacementHold = 'return pc->is_playing() &&`r`n            !pc->is_paused() &&`r`n            pc->playback_can_seek();'
+          $countHold = [regex]::Matches($text, $patternHold).Count
+          if ($countHold -ne 1) { throw "Expected one Hold/Reverse availability gate; found $countHold." }
+          $text = [regex]::Replace($text, $patternHold, $replacementHold, 1)
+
+          # Muted drag/scrub should work in full-track 1X as well as zoomed views.
+          # Scratch audition remains disabled; the existing HOLD/silence path is left unchanged.
+          $patternDrag = 'if \(m_followPlayhead &&\s*m_followMode == follow_mode::centered &&\s*m_viewSpan < 0\.9995 &&\s*pc->is_playing\(\) &&\s*pc->playback_can_seek\(\) &&\s*playback_fraction\(positionFrac\)\) \{'
+          $replacementDrag = 'if (pc->is_playing() &&`r`n            pc->playback_can_seek() &&`r`n            playback_fraction(positionFrac)) {'
+          $countDrag = [regex]::Matches($text, $patternDrag).Count
+          if ($countDrag -ne 1) { throw "Expected one muted-drag zoom gate; found $countDrag." }
+          $text = [regex]::Replace($text, $patternDrag, $replacementDrag, 1)
+
+          Set-Content -Path $path -Value $text -Encoding UTF8
+
+          Select-String -Path $path -Pattern 'bool touch_hold_can_start|Scratch audition is intentionally disabled|void reset_view' -Context 0,8
+
+      - name: Get foobar2000 SDK
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/reupen/foobar2000-sdk-unmodified.git sdk
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build PFC
+        shell: pwsh
+        run: |
+          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\x64\Release\"
+
+      - name: Build foobar2000 SDK
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\x64\Release\"
+
+      - name: Build component client
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\x64\Release\"
+
+      - name: Build foo_spectral_waveform
+        shell: pwsh
+        run: |
+          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:BuildProjectReferences=false
+
+      - name: Package fb2k-component
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) { throw "Built DLL not found." }
+          New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
+          Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
+          if (Test-Path "foo_spectral_waveform-hold-reverse-1x.zip") { Remove-Item "foo_spectral_waveform-hold-reverse-1x.zip" -Force }
+          if (Test-Path "foo_spectral_waveform-hold-reverse-1x.fb2k-component") { Remove-Item "foo_spectral_waveform-hold-reverse-1x.fb2k-component" -Force }
+          7z a -tzip foo_spectral_waveform-hold-reverse-1x.zip ".\stage\x64\foo_spectral_waveform.dll"
+          Rename-Item foo_spectral_waveform-hold-reverse-1x.zip foo_spectral_waveform-hold-reverse-1x.fb2k-component
+
+      - name: Upload test component
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_spectral_waveform-hold-reverse-1x
+          path: foo_spectral_waveform-hold-reverse-1x.fb2k-component
+          if-no-files-found: error
