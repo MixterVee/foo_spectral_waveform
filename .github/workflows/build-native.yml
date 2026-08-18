@@ -286,7 +286,7 @@ jobs:
             $ui = $ui.Replace($marker, $overlay)
           }
 
-          if ($ui -notmatch 'm_processingDisplayUntil') {
+          if ($ui -notmatch 'mutable ULONGLONG m_processingDisplayUntil') {
             $memberMarker = '    HDC m_waveDC = nullptr;'
             if (-not $ui.Contains($memberMarker)) { throw "Processing latch member insertion point not found." }
             $ui = $ui.Replace($memberMarker, '    mutable ULONGLONG m_processingDisplayUntil = 0;' + $nl + $nl + $memberMarker)
