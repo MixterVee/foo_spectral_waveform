@@ -1,1 +1,1 @@
-Trigger PR-based build for waveform benchmark menu.
+Trigger PR-based build for waveform benchmark menu (probe 2).
