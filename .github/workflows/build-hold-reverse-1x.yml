@@ -110,3 +110,5 @@ jobs:
           name: foo_spectral_waveform-hold-reverse-1x
           path: foo_spectral_waveform-hold-reverse-1x.fb2k-component
           if-no-files-found: error
+
+# Registered workflow trigger.
