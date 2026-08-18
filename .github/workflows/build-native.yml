@@ -5,6 +5,10 @@ on:
     branches: [ agent/waveform-benchmark-menu ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
   build:
     runs-on: windows-2022
@@ -12,6 +16,20 @@ jobs:
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
+
+      - name: Record run id for chat handoff
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\deliverables" | Out-Null
+          Set-Content "$env:GITHUB_WORKSPACE\deliverables\waveform-benchmark-menu-run-id.txt" "$env:GITHUB_RUN_ID" -Encoding ascii
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deliverables/waveform-benchmark-menu-run-id.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Record waveform benchmark menu run id [skip ci]"
+            git push origin HEAD:agent/waveform-benchmark-menu
+          }
 
       - name: Add Stem Separator benchmark to waveform menu
         shell: pwsh
