@@ -1,26 +1,15 @@
-name: Build waveform benchmark menu test
+name: Build waveform benchmark menu PR test
 
 on:
-  push:
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
-
-permissions:
-  contents: read
-  issues: write
-  actions: read
 
 jobs:
   build:
     runs-on: windows-2022
 
     steps:
-      - name: Record run id in handoff issue
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api "repos/${{ github.repository }}/issues/1/comments" -f "body=RUN_ID=$env:GITHUB_RUN_ID"
-
       - name: Checkout project
         uses: actions/checkout@v4
 
@@ -62,6 +51,7 @@ jobs:
           $text = $text.Replace($oldMenu, $newMenu)
 
           Set-Content -Path $path -Value $text -Encoding UTF8
+          Select-String -Path $path -Pattern 'kStemBenchmark|Benchmark / Select Processing Backend' -Context 1,2
 
       - name: Get foobar2000 SDK
         shell: pwsh
