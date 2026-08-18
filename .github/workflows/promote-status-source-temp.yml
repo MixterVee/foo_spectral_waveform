@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/workflows/promote-status-source-temp.yml'
       - 'promote-status-source-main-trigger.txt'
+  pull_request:
+    branches: [ main ]
 
 permissions:
   contents: write
