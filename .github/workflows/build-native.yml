@@ -52,7 +52,7 @@ jobs:
               '        std::lock_guard<std::mutex> lock(m_mutex);',
               '        stem_analysis_status out;',
               '        out.mode = (m_mode == 1 || m_mode == 2) ? m_mode : 0;',
-              '        out.active = m_analysisActive;',
+              '        out.active = m_analysisActive || m_hasRequest;',
               '        out.ready = m_ready;',
               '        out.progress_percent = m_ready ? 100 : std::clamp(m_analysisProgress, 0, 100);',
               '        return out;',
@@ -233,10 +233,16 @@ jobs:
               '            }',
               '        }',
               '',
+              '        const ULONGLONG now = GetTickCount64();',
+              '        if (haveBackend && backend.processing) m_processingDisplayUntil = now + 1500;',
+              '        const bool recentProcessing = m_processingDisplayUntil != 0 && now < m_processingDisplayUntil;',
+              '',
               '        if (mode == 0) {',
-              '            if (haveBackend && backend.processing) {',
-              '                if (!backendName.empty()) label += L"  |  " + backendName;',
-              '                label += L"  |  Pre-caching...";',
+              '            if (!backendName.empty()) label += L"  |  " + backendName;',
+              '            if (haveBackend && backend.engine_ready) {',
+              '                label += (backend.processing || recentProcessing)',
+              '                    ? L"  |  Pre-caching..."',
+              '                    : L"  |  Ready";',
               '            }',
               '        } else {',
               '            if (!backendName.empty()) label += L"  |  " + backendName;',
@@ -280,6 +286,12 @@ jobs:
             $ui = $ui.Replace($marker, $overlay)
           }
 
+          if ($ui -notmatch 'm_processingDisplayUntil') {
+            $memberMarker = '    HDC m_waveDC = nullptr;'
+            if (-not $ui.Contains($memberMarker)) { throw "Processing latch member insertion point not found." }
+            $ui = $ui.Replace($memberMarker, '    mutable ULONGLONG m_processingDisplayUntil = 0;' + $nl + $nl + $memberMarker)
+          }
+
           $paintMarker = '            draw_view_overlay(dc, width, height);'
           if ($ui.Contains($paintMarker) -and $ui -notmatch 'draw_processing_overlay\(dc, width, height\);') {
             $ui = $ui.Replace($paintMarker, $paintMarker + $nl + '            draw_processing_overlay(dc, width, height);')
@@ -287,7 +299,7 @@ jobs:
           Set-Content $uiPath $ui -Encoding UTF8
 
           Select-String -Path $capturePath -Pattern 'analysis_status|progress_percent|completedBlocks' -Context 1,2
-          Select-String -Path $uiPath -Pattern 'draw_processing_overlay|find_processing_status_service' -Context 1,2
+          Select-String -Path $uiPath -Pattern 'draw_processing_overlay|m_processingDisplayUntil' -Context 1,2
 
       - name: Get foobar2000 SDK
         shell: pwsh
