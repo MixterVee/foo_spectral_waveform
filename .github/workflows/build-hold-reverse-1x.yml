@@ -39,6 +39,7 @@ jobs:
         run: |
           $path = "$env:GITHUB_WORKSPACE\spectral_ui.cpp"
           $text = Get-Content $path -Raw
+          $nl = [Environment]::NewLine
 
           # Fit Track / 1X must not cancel an already active Hold or Reverse.
           $patternReset = '(?m)^\s*if \(reverse_active\(\)\) end_reverse_transport\(\);\r?\n\s*if \(m_touchHoldLatched && !m_dragging\) release_touch_hold\(\);\r?\n'
@@ -48,7 +49,7 @@ jobs:
 
           # Hold and Reverse are transport operations; do not require zoom or Centered Scroll.
           $patternHold = 'return m_followPlayhead &&\s*m_followMode == follow_mode::centered &&\s*m_viewSpan < 0\.9995 &&\s*pc->is_playing\(\) &&\s*!pc->is_paused\(\) &&\s*pc->playback_can_seek\(\);'
-          $replacementHold = 'return pc->is_playing() &&`r`n            !pc->is_paused() &&`r`n            pc->playback_can_seek();'
+          $replacementHold = "return pc->is_playing() &&${nl}            !pc->is_paused() &&${nl}            pc->playback_can_seek();"
           $countHold = [regex]::Matches($text, $patternHold).Count
           if ($countHold -ne 1) { throw "Expected one Hold/Reverse availability gate; found $countHold." }
           $text = [regex]::Replace($text, $patternHold, $replacementHold, 1)
@@ -56,7 +57,7 @@ jobs:
           # Muted drag/scrub should work in full-track 1X as well as zoomed views.
           # Scratch audition remains disabled; the existing HOLD/silence path is left unchanged.
           $patternDrag = 'if \(m_followPlayhead &&\s*m_followMode == follow_mode::centered &&\s*m_viewSpan < 0\.9995 &&\s*pc->is_playing\(\) &&\s*pc->playback_can_seek\(\) &&\s*playback_fraction\(positionFrac\)\) \{'
-          $replacementDrag = 'if (pc->is_playing() &&`r`n            pc->playback_can_seek() &&`r`n            playback_fraction(positionFrac)) {'
+          $replacementDrag = "if (pc->is_playing() &&${nl}            pc->playback_can_seek() &&${nl}            playback_fraction(positionFrac)) {"
           $countDrag = [regex]::Matches($text, $patternDrag).Count
           if ($countDrag -ne 1) { throw "Expected one muted-drag zoom gate; found $countDrag." }
           $text = [regex]::Replace($text, $patternDrag, $replacementDrag, 1)
@@ -110,5 +111,3 @@ jobs:
           name: foo_spectral_waveform-hold-reverse-1x
           path: foo_spectral_waveform-hold-reverse-1x.fb2k-component
           if-no-files-found: error
-
-# Registered workflow trigger.
