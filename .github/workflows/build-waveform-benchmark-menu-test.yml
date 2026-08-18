@@ -1,0 +1,107 @@
+name: Build waveform benchmark menu test handoff
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-waveform-benchmark-menu-test.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout test branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/waveform-benchmark-menu
+
+      - name: Add Stem Separator benchmark to waveform menu
+        shell: pwsh
+        run: |
+          $path = "$env:GITHUB_WORKSPACE\spectral_ui.cpp"
+          $text = Get-Content $path -Raw
+
+          $oldEnum = @'
+    kStemSaveInstrumentalMp3,
+    kStemPrecache,
+    kStemCommandCount
+'@
+          $newEnum = @'
+    kStemSaveInstrumentalMp3,
+    kStemPrecache,
+    kStemBenchmark,
+    kStemCommandCount
+'@
+          if (-not $text.Contains($oldEnum)) { throw "Stem command enum insertion point not found." }
+          $text = $text.Replace($oldEnum, $newEnum)
+
+          $oldGuid = @'
+    {0xa92a1007,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x07}},
+    {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}}
+'@
+          $newGuid = @'
+    {0xa92a1007,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x07}},
+    {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}},
+    {0xa92a1010,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x10}}
+'@
+          if (-not $text.Contains($oldGuid)) { throw "Stem command GUID insertion point not found." }
+          $text = $text.Replace($oldGuid, $newGuid)
+
+          $oldMenu = '            addStem(kStemPrecache, L"Pre-cache at track start");'
+          $newMenu = $oldMenu + "`r`n            AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);`r`n            addStem(kStemBenchmark, L`"Benchmark / Select Processing Backend...`");"
+          if (-not $text.Contains($oldMenu)) { throw "Stem submenu insertion point not found." }
+          $text = $text.Replace($oldMenu, $newMenu)
+
+          Set-Content -Path $path -Value $text -Encoding UTF8
+
+      - name: Get foobar2000 SDK
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/reupen/foobar2000-sdk-unmodified.git sdk
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build PFC
+        shell: pwsh
+        run: |
+          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\x64\Release\"
+
+      - name: Build foobar2000 SDK
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\x64\Release\"
+
+      - name: Build component client
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\x64\Release\"
+
+      - name: Build foo_spectral_waveform
+        shell: pwsh
+        run: |
+          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:BuildProjectReferences=false
+
+      - name: Package component
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) { throw "Built DLL not found." }
+          New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
+          Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
+          7z a -tzip foo_spectral_waveform-benchmark-menu.zip ".\stage\x64\foo_spectral_waveform.dll"
+          Rename-Item foo_spectral_waveform-benchmark-menu.zip foo_spectral_waveform-benchmark-menu.fb2k-component
+
+      - name: Publish test component to test branch
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force deliverables | Out-Null
+          Copy-Item foo_spectral_waveform-benchmark-menu.fb2k-component deliverables\foo_spectral_waveform-benchmark-menu.fb2k-component -Force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deliverables/foo_spectral_waveform-benchmark-menu.fb2k-component
+          git commit -m "Publish waveform benchmark menu test component [skip ci]"
+          git push origin HEAD:agent/waveform-benchmark-menu
