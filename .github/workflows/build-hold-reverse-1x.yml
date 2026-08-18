@@ -1,4 +1,4 @@
-name: Build 1X Hold Reverse muted drag test
+name: Promote tested 1X Hold Reverse muted drag source
 
 on:
   push:
@@ -41,30 +41,28 @@ jobs:
           $text = Get-Content $path -Raw
           $nl = [Environment]::NewLine
 
-          # Fit Track / 1X must not cancel an already active Hold or Reverse.
+          if ($text.Contains('m_viewSpan >= 0.9995 && !m_centerScrubbing')) {
+            Write-Host "1X transport source changes are already present."
+            exit 0
+          }
+
           $patternReset = '(?m)^\s*if \(reverse_active\(\)\) end_reverse_transport\(\);\r?\n\s*if \(m_touchHoldLatched && !m_dragging\) release_touch_hold\(\);\r?\n'
           $countReset = [regex]::Matches($text, $patternReset).Count
           if ($countReset -ne 1) { throw "Expected one reset_view transport-cancel block; found $countReset." }
           $text = [regex]::Replace($text, $patternReset, '', 1)
 
-          # Hold and Reverse are transport operations; do not require zoom or Centered Scroll.
           $patternHold = 'return m_followPlayhead &&\s*m_followMode == follow_mode::centered &&\s*m_viewSpan < 0\.9995 &&\s*pc->is_playing\(\) &&\s*!pc->is_paused\(\) &&\s*pc->playback_can_seek\(\);'
           $replacementHold = "return pc->is_playing() &&${nl}            !pc->is_paused() &&${nl}            pc->playback_can_seek();"
           $countHold = [regex]::Matches($text, $patternHold).Count
           if ($countHold -ne 1) { throw "Expected one Hold/Reverse availability gate; found $countHold." }
           $text = [regex]::Replace($text, $patternHold, $replacementHold, 1)
 
-          # Muted drag/scrub should work in full-track 1X as well as zoomed views.
-          # Scratch audition remains disabled; the existing HOLD/silence path is left unchanged.
           $patternDrag = 'if \(m_followPlayhead &&\s*m_followMode == follow_mode::centered &&\s*m_viewSpan < 0\.9995 &&\s*pc->is_playing\(\) &&\s*pc->playback_can_seek\(\) &&\s*playback_fraction\(positionFrac\)\) \{'
           $replacementDrag = "if (pc->is_playing() &&${nl}            pc->playback_can_seek() &&${nl}            playback_fraction(positionFrac)) {"
           $countDrag = [regex]::Matches($text, $patternDrag).Count
           if ($countDrag -ne 1) { throw "Expected one muted-drag zoom gate; found $countDrag." }
           $text = [regex]::Replace($text, $patternDrag, $replacementDrag, 1)
 
-          # Once a 1X muted grab has started, do not reject movement just because
-          # the entire track is visible. Centered scrub already supports temporary
-          # blank overscroll outside 0:00 / EOF so the waveform has room to move.
           $patternMove = 'if \(!m_dragMoved \|\| m_viewSpan >= 0\.9995\) return;'
           $replacementMove = "if (!m_dragMoved) return;${nl}        if (m_viewSpan >= 0.9995 && !m_centerScrubbing) return;"
           $countMove = [regex]::Matches($text, $patternMove).Count
@@ -73,7 +71,17 @@ jobs:
 
           Set-Content -Path $path -Value $text -Encoding UTF8
 
-          Select-String -Path $path -Pattern 'bool touch_hold_can_start|Scratch audition is intentionally disabled|m_viewSpan >= 0.9995 && !m_centerScrubbing|void reset_view' -Context 0,8
+      - name: Commit tested transport behavior into source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add spectral_ui.cpp
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Make 1X Hold Reverse and muted drag behavior permanent"
+            git push origin HEAD:agent/hold-reverse-1x
+          }
 
       - name: Get foobar2000 SDK
         shell: pwsh
