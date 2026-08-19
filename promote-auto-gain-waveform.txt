@@ -1,1 +1,0 @@
-Promote the user-tested Automatic Gain Matching waveform menu to stable 0.6.0.

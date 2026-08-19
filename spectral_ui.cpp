@@ -95,6 +95,7 @@ enum stem_menu_command : unsigned {
     kStemBlendInstrumental50,
     kStemBlendInstrumental75,
     kStemBlendInstrumental100,
+    kStemGainMatch,
     kStemCommandCount
 };
 
@@ -127,7 +128,8 @@ static const GUID kStemCommandGuids[kStemCommandCount] = {
     {0xa92a1041,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x41}},
     {0xa92a1042,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x42}},
     {0xa92a1043,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x43}},
-    {0xa92a1044,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x44}}
+    {0xa92a1044,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x44}},
+    {0xa92a1050,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x50}}
 };
 
 stem_transport_service::ptr find_transport_service() {
@@ -1294,6 +1296,17 @@ private:
                     reinterpret_cast<UINT_PTR>(blendMenu),
                     L"Stem Blend");
             }
+
+            service_ptr_t<contextmenu_item> gainMatchProbe;
+            t_uint32 gainMatchProbeIndex = 0;
+            const bool gainMatchAvailable = resolve_stem_command(
+                kStemGainMatch, gainMatchProbe, gainMatchProbeIndex);
+            const std::wstring gainMatchLabel = stem_command_name(
+                kStemGainMatch, L"Automatic Gain Matching");
+            AppendMenuW(stemMenu,
+                MF_STRING | (gainMatchAvailable ? 0 : MF_GRAYED),
+                kMenuStemBase + kStemGainMatch,
+                gainMatchLabel.c_str());
 
             AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
             addStem(kStemSaveVocalsWav, L"Save Vocals as WAV...");
