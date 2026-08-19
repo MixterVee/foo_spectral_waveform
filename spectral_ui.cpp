@@ -75,6 +75,15 @@ enum stem_menu_command : unsigned {
     kStemSaveInstrumentalMp3,
     kStemPrecache,
     kStemBenchmark,
+    kStemCacheEnabled,
+    kStemCacheStatus,
+    kStemCacheClear,
+    kStemCache2GB,
+    kStemCache5GB,
+    kStemCache10GB,
+    kStemCache20GB,
+    kStemCache50GB,
+    kStemCache100GB,
     kStemCommandCount
 };
 
@@ -87,7 +96,16 @@ static const GUID kStemCommandGuids[kStemCommandCount] = {
     {0xa92a1006,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x06}},
     {0xa92a1007,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x07}},
     {0xa92a1008,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x08}},
-    {0xa92a1010,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x10}}
+    {0xa92a1010,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x10}},
+    {0xa92a1011,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x11}},
+    {0xa92a1012,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x12}},
+    {0xa92a1013,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x13}},
+    {0xa92a1021,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x21}},
+    {0xa92a1022,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x22}},
+    {0xa92a1023,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x23}},
+    {0xa92a1024,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x24}},
+    {0xa92a1025,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x25}},
+    {0xa92a1026,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x26}}
 };
 
 stem_transport_service::ptr find_transport_service() {
@@ -1106,10 +1124,10 @@ private:
     std::wstring stem_command_name(unsigned command, const wchar_t* fallback) const {
         service_ptr_t<contextmenu_item> item;
         t_uint32 index = 0;
-        if (!resolve_stem_command(command, item, index) || m_currentTrack.is_empty()) return fallback;
+        if (!resolve_stem_command(command, item, index)) return fallback;
 
         metadb_handle_list data;
-        data.add_item(m_currentTrack);
+        if (!m_currentTrack.is_empty()) data.add_item(m_currentTrack);
         pfc::string8 text;
         unsigned flags = 0;
         if (!item->item_get_display_data_root(
@@ -1120,14 +1138,15 @@ private:
     }
 
     void execute_stem_command(unsigned command) {
-        if (m_currentTrack.is_empty()) return;
+        const bool cacheCommand = command >= kStemCacheEnabled;
+        if (!cacheCommand && m_currentTrack.is_empty()) return;
 
         service_ptr_t<contextmenu_item> item;
         t_uint32 index = 0;
         if (!resolve_stem_command(command, item, index)) return;
 
         metadb_handle_list data;
-        data.add_item(m_currentTrack);
+        if (!m_currentTrack.is_empty()) data.add_item(m_currentTrack);
         item->item_execute_simple(index, pfc::guid_null, data, contextmenu_item::caller_now_playing);
 
         // The normal separator context menu is observed on the next playback-time
@@ -1213,6 +1232,57 @@ private:
             addStem(kStemSaveInstrumentalMp3, L"Save Instrumental as MP3...");
             AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
             addStem(kStemPrecache, L"Pre-cache at track start");
+            AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
+
+            // Cache controls are global Stem Separator commands. Keep the waveform
+            // as a thin menu mirror so both menus always read and change the same
+            // persistent cache configuration and disk cache.
+            service_ptr_t<contextmenu_item> cacheProbe;
+            t_uint32 cacheProbeIndex = 0;
+            const bool cacheAvailable = resolve_stem_command(
+                kStemCacheEnabled, cacheProbe, cacheProbeIndex);
+            HMENU cacheMenu = CreatePopupMenu();
+            if (cacheMenu != nullptr) {
+                auto addCache = [&](unsigned commandIndex, const wchar_t* fallback) {
+                    const std::wstring label = stem_command_name(commandIndex, fallback);
+                    AppendMenuW(cacheMenu,
+                        MF_STRING | (cacheAvailable ? 0 : MF_GRAYED),
+                        kMenuStemBase + commandIndex,
+                        label.c_str());
+                };
+
+                addCache(kStemCacheEnabled, L"Persistent Cache");
+                addCache(kStemCacheStatus, L"Current Cache");
+                addCache(kStemCacheClear, L"Clear Stem Cache...");
+                AppendMenuW(cacheMenu, MF_SEPARATOR, 0, nullptr);
+
+                HMENU sizeMenu = CreatePopupMenu();
+                if (sizeMenu != nullptr) {
+                    auto addSize = [&](unsigned commandIndex, const wchar_t* fallback) {
+                        const std::wstring label = stem_command_name(commandIndex, fallback);
+                        AppendMenuW(sizeMenu,
+                            MF_STRING | (cacheAvailable ? 0 : MF_GRAYED),
+                            kMenuStemBase + commandIndex,
+                            label.c_str());
+                    };
+                    addSize(kStemCache2GB, L"2 GB");
+                    addSize(kStemCache5GB, L"5 GB");
+                    addSize(kStemCache10GB, L"10 GB");
+                    addSize(kStemCache20GB, L"20 GB");
+                    addSize(kStemCache50GB, L"50 GB");
+                    addSize(kStemCache100GB, L"100 GB");
+                    AppendMenuW(cacheMenu,
+                        MF_POPUP | (cacheAvailable ? 0 : MF_GRAYED),
+                        reinterpret_cast<UINT_PTR>(sizeMenu),
+                        L"Maximum Cache Size");
+                }
+
+                AppendMenuW(stemMenu,
+                    MF_POPUP | (cacheAvailable ? 0 : MF_GRAYED),
+                    reinterpret_cast<UINT_PTR>(cacheMenu),
+                    L"Cache Settings");
+            }
+
             AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
             addStem(kStemBenchmark, L"Benchmark / Select Processing Backend...");
 
