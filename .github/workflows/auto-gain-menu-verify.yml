@@ -15,7 +15,7 @@ jobs:
       - name: Apply Automatic Gain Matching menu patch
         shell: pwsh
         run: |
-          python .\patch-auto-gain-menu.py
+          python .\patch-auto-gain-menu-v2.py
 
       - name: Get foobar2000 SDK
         shell: pwsh
