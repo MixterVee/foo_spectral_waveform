@@ -1,48 +1,46 @@
 # foo_spectral_waveform
 
-Experimental foobar2000 v2 spectral waveform component.
+Native foobar2000 v2 x64 spectral waveform component with stem-aware visualization and controls.
 
-## v0.1.0-alpha scope
+## Current stable: 0.4.0
 
-This first milestone intentionally contains only:
+### Waveform display
 
-- a valid foobar2000 component entry point
-- a pure C++ PCM analysis engine
-- cached-point data structures
-- bass / mids / treble spectral extraction
-- Serato-inspired RGB color mapping
-- a foobar console message confirming that the component loaded
+- Serato-inspired frequency coloring
+- bass / mids / treble spectral analysis
+- zoom and fit-entire-track views
+- centered and page follow modes
+- playback cursor and optional time markers
+- persistent waveform analysis cache
+- re-analyze current track command
 
-It does **not** yet expose a Default UI panel. That is the next milestone after
-we verify this build loads cleanly in foobar2000.
+### Stem awareness
 
-## Spectral model
+When Stem Separator is installed, the waveform follows the post-DSP result so Original, Vocals, and Instrumental views reflect what is being heard.
 
-Initial bands:
+The waveform right-click menu mirrors Stem Separator commands rather than maintaining a second copy of stem state. This includes:
 
-- Bass: 20–250 Hz
-- Mids: 250 Hz–4 kHz
-- Treble: 4–20 kHz
+- Original / Vocals / Instrumental
+- WAV and MP3 stem export
+- pre-cache at track start
+- Cache Settings
+  - Persistent Cache On/Off
+  - Current Cache size
+  - Clear Stem Cache
+  - 2 / 5 / 10 / 20 / 50 / 100 GB maximum-size presets
+- processing backend benchmark / selection
 
-Each analysis point stores:
+### Drag and hold behavior
 
-```cpp
-uint16_t peak;
-uint8_t bass;
-uint8_t mids;
-uint8_t treble;
-```
+Audible scratching was intentionally removed. While the waveform is grabbed or dragged, transport audio is muted/held; the final seek is committed on release. This is the stable intended behavior and avoids the looping/stuck-audio problems from the earlier scratch experiments.
 
-This keeps the cache compact while leaving enough information to draw a
-frequency-colored waveform.
+## Requirements
 
-## Planned next milestone
+- Windows 10/11 x64
+- foobar2000 v2 x64
+- Visual Studio 2022 for source builds
+- foobar2000 SDK compatible with the repository workflow
 
-v0.2:
+## Build
 
-1. Decode the current playing track in a worker thread.
-2. Feed PCM into `spectral_analyzer`.
-3. Add a Default UI element.
-4. Draw the waveform with bass=warm/red, mids=green/yellow,
-   treble=blue/cyan.
-5. Draw playback progress and support click-to-seek.
+The supported build is `.github/workflows/build-native.yml`, which builds the foobar2000 SDK dependencies, the component, and packages `foo_spectral_waveform.fb2k-component`.
