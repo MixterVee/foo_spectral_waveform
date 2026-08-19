@@ -1,1 +1,0 @@
-Promote the user-tested Spectral Waveform Stem Blend menu patch to stable source.

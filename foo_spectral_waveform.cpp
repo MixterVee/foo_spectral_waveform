@@ -4,7 +4,7 @@
 
 DECLARE_COMPONENT_VERSION(
     "Spectral Waveform",
-    "0.4.0 Stable Stem-Aware Waveform",
+    "0.5.0 Stable Stem Blend Menu",
     "Serato-inspired spectral waveform for foobar2000.\n"
     "Bass / mids / treble coloring, zoom and follow modes, time markers, persistent analysis cache, and stem-aware post-DSP updates.\n"
     "Mirrors Stem Separator controls including cache settings, exports, pre-cache and backend benchmark; drag/hold audition is intentionally muted and the seek is committed on release."
@@ -17,7 +17,7 @@ namespace {
 class spectral_initquit : public initquit {
 public:
     void on_init() override {
-        console::print("foo_spectral_waveform: v0.4.0 loaded");
+        console::print("foo_spectral_waveform: v0.5.0 loaded");
     }
 
     void on_quit() override {}

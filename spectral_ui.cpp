@@ -69,6 +69,7 @@ enum stem_menu_command : unsigned {
     kStemOriginal = 0,
     kStemVocals,
     kStemInstrumental,
+    kStemBlend,
     kStemSaveVocalsWav,
     kStemSaveInstrumentalWav,
     kStemSaveVocalsMp3,
@@ -84,6 +85,16 @@ enum stem_menu_command : unsigned {
     kStemCache20GB,
     kStemCache50GB,
     kStemCache100GB,
+    kStemBlendVocal0,
+    kStemBlendVocal25,
+    kStemBlendVocal50,
+    kStemBlendVocal75,
+    kStemBlendVocal100,
+    kStemBlendInstrumental0,
+    kStemBlendInstrumental25,
+    kStemBlendInstrumental50,
+    kStemBlendInstrumental75,
+    kStemBlendInstrumental100,
     kStemCommandCount
 };
 
@@ -91,6 +102,7 @@ static const GUID kStemCommandGuids[kStemCommandCount] = {
     {0xa92a1001,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x01}},
     {0xa92a1002,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x02}},
     {0xa92a1003,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x03}},
+    {0xa92a1009,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x09}},
     {0xa92a1004,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x04}},
     {0xa92a1005,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x05}},
     {0xa92a1006,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x06}},
@@ -105,7 +117,17 @@ static const GUID kStemCommandGuids[kStemCommandCount] = {
     {0xa92a1023,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x23}},
     {0xa92a1024,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x24}},
     {0xa92a1025,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x25}},
-    {0xa92a1026,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x26}}
+    {0xa92a1026,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x26}},
+    {0xa92a1030,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x30}},
+    {0xa92a1031,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x31}},
+    {0xa92a1032,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x32}},
+    {0xa92a1033,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x33}},
+    {0xa92a1034,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x34}},
+    {0xa92a1040,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x40}},
+    {0xa92a1041,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x41}},
+    {0xa92a1042,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x42}},
+    {0xa92a1043,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x43}},
+    {0xa92a1044,0xd1f0,0x4ae1,{0xa0,0x11,0x31,0x10,0x42,0x00,0x00,0x44}}
 };
 
 stem_transport_service::ptr find_transport_service() {
@@ -1225,6 +1247,54 @@ private:
             addStem(kStemOriginal, L"Original", stemMode == 0);
             addStem(kStemVocals, L"Vocals", stemMode == 1);
             addStem(kStemInstrumental, L"Instrumental", stemMode == 2);
+            addStem(kStemBlend, L"Blend", stemMode == 3);
+
+            service_ptr_t<contextmenu_item> blendProbe;
+            t_uint32 blendProbeIndex = 0;
+            const bool blendAvailable = resolve_stem_command(
+                kStemBlendVocal0, blendProbe, blendProbeIndex);
+            HMENU blendMenu = CreatePopupMenu();
+            if (blendMenu != nullptr) {
+                auto addLevelMenu = [&](HMENU target, unsigned commandIndex, const wchar_t* fallback) {
+                    const std::wstring label = stem_command_name(commandIndex, fallback);
+                    AppendMenuW(target,
+                        MF_STRING | (blendAvailable ? 0 : MF_GRAYED),
+                        kMenuStemBase + commandIndex,
+                        label.c_str());
+                };
+
+                HMENU vocalMenu = CreatePopupMenu();
+                if (vocalMenu != nullptr) {
+                    addLevelMenu(vocalMenu, kStemBlendVocal0, L"0%");
+                    addLevelMenu(vocalMenu, kStemBlendVocal25, L"25%");
+                    addLevelMenu(vocalMenu, kStemBlendVocal50, L"50%");
+                    addLevelMenu(vocalMenu, kStemBlendVocal75, L"75%");
+                    addLevelMenu(vocalMenu, kStemBlendVocal100, L"100%");
+                    AppendMenuW(blendMenu,
+                        MF_POPUP | (blendAvailable ? 0 : MF_GRAYED),
+                        reinterpret_cast<UINT_PTR>(vocalMenu),
+                        L"Vocals");
+                }
+
+                HMENU instrumentalMenu = CreatePopupMenu();
+                if (instrumentalMenu != nullptr) {
+                    addLevelMenu(instrumentalMenu, kStemBlendInstrumental0, L"0%");
+                    addLevelMenu(instrumentalMenu, kStemBlendInstrumental25, L"25%");
+                    addLevelMenu(instrumentalMenu, kStemBlendInstrumental50, L"50%");
+                    addLevelMenu(instrumentalMenu, kStemBlendInstrumental75, L"75%");
+                    addLevelMenu(instrumentalMenu, kStemBlendInstrumental100, L"100%");
+                    AppendMenuW(blendMenu,
+                        MF_POPUP | (blendAvailable ? 0 : MF_GRAYED),
+                        reinterpret_cast<UINT_PTR>(instrumentalMenu),
+                        L"Instrumental");
+                }
+
+                AppendMenuW(stemMenu,
+                    MF_POPUP | (blendAvailable ? 0 : MF_GRAYED),
+                    reinterpret_cast<UINT_PTR>(blendMenu),
+                    L"Stem Blend");
+            }
+
             AppendMenuW(stemMenu, MF_SEPARATOR, 0, nullptr);
             addStem(kStemSaveVocalsWav, L"Save Vocals as WAV...");
             addStem(kStemSaveInstrumentalWav, L"Save Instrumental as WAV...");
