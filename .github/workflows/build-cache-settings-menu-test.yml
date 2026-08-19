@@ -1,0 +1,99 @@
+name: Waveform Cache Settings Menu Test
+
+on:
+  push:
+    branches: [ agent/cache-settings-menu ]
+    paths:
+      - patch-cache-settings-menu.py
+      - spectral_ui.cpp
+      - .github/workflows/build-cache-settings-menu-test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Record run id for chat handoff
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\deliverables" | Out-Null
+          Set-Content "$env:GITHUB_WORKSPACE\deliverables\waveform-cache-menu-run-id.txt" "$env:GITHUB_RUN_ID" -Encoding ascii
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deliverables/waveform-cache-menu-run-id.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Record waveform cache menu test run [skip ci]"
+            git push origin HEAD:agent/cache-settings-menu
+          }
+
+      - name: Apply cache settings menu mirror
+        shell: pwsh
+        run: |
+          python .\patch-cache-settings-menu.py
+          if ($LASTEXITCODE -ne 0) { throw "Waveform cache settings menu patch failed." }
+
+      - name: Get foobar2000 SDK
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/reupen/foobar2000-sdk-unmodified.git sdk
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build PFC
+        shell: pwsh
+        run: |
+          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\x64\Release\"
+
+      - name: Build foobar2000 SDK
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\x64\Release\"
+
+      - name: Build component client
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\x64\Release\"
+
+      - name: Build foo_spectral_waveform
+        shell: pwsh
+        run: |
+          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:BuildProjectReferences=false
+
+      - name: Package test component
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) {
+            throw "Built DLL not found."
+          }
+
+          New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
+          Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
+          Set-Content "stage\CACHE_SETTINGS_MENU_TEST.txt" @(
+            "Spectral Waveform - Stem Separator Cache Settings menu test",
+            "Mirrors the Stem Separator cache controls by registered context-command GUID.",
+            "Requires the matching Stem Separator Cache Settings test build.",
+            "No separate waveform cache state is created."
+          ) -Encoding UTF8
+
+          $zip = "foo_spectral_waveform-cache-settings-menu-test.zip"
+          $component = "foo_spectral_waveform-cache-settings-menu-test.fb2k-component"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          if (Test-Path $component) { Remove-Item $component -Force }
+          7z a -tzip $zip ".\stage\x64\foo_spectral_waveform.dll" ".\stage\CACHE_SETTINGS_MENU_TEST.txt"
+          Rename-Item $zip $component
+
+      - name: Upload test component
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_spectral_waveform-cache-settings-menu-test
+          path: foo_spectral_waveform-cache-settings-menu-test.fb2k-component
+          if-no-files-found: error
