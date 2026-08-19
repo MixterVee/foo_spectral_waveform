@@ -1,3 +1,4 @@
+# Branch-only CI patch for Automatic Gain Matching menu verification.
 from pathlib import Path
 
 
