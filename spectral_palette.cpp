@@ -27,43 +27,89 @@ rgb_color color_for_point(const waveform_point& p) {
         p.air / 255.0f
     };
 
-    // Favor the strongest regions enough to keep colours vivid, while retaining
-    // neighboring-band mixtures for smooth musical transitions.
-    float total = 0.0001f;
-    for (auto& v : band) {
-        v = std::pow(clamp01(v), 1.20f);
-        total += v;
-    }
-    for (auto& v : band) v /= total;
+    // The analyzer already stores normalized twelve-band shares. For display,
+    // compensate the natural visual dominance of low bands and then keep only
+    // the strongest few spectral regions for each time slice. Blending all
+    // twelve bands together was washing the extra detail back into red/orange.
+    static constexpr std::array<float, 12> kDisplayGain{
+        0.72f, 0.78f, 0.84f, 0.90f,
+        0.98f, 1.05f, 1.15f, 1.28f,
+        1.42f, 1.62f, 1.88f, 2.15f
+    };
 
-    // Serato-inspired frequency anchors from warm lows through cool highs and
-    // violet/pink air. Adjacent bands interpolate naturally by RGB mixing.
+    std::array<float, 12> score{};
+    for (std::size_t i = 0; i < score.size(); ++i) {
+        score[i] = std::pow(clamp01(band[i] * kDisplayGain[i]), 1.55f);
+    }
+
+    std::array<std::size_t, 12> order{};
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(),
+        [&score](std::size_t a, std::size_t b) { return score[a] > score[b]; });
+
+    // Frequency anchors: warm lows, green/cyan mids, blue/violet highs and
+    // magenta air. The top-three blend gives each column a distinct spectral
+    // identity instead of an all-band average.
     static constexpr std::array<std::array<float, 3>, 12> kColor{{
-        {{1.00f, 0.04f, 0.02f}}, // sub: red
-        {{1.00f, 0.12f, 0.02f}}, // deep bass: red-orange
-        {{1.00f, 0.28f, 0.02f}}, // bass: orange
-        {{1.00f, 0.48f, 0.02f}}, // upper bass: amber
-        {{1.00f, 0.76f, 0.03f}}, // low mid: gold
-        {{0.92f, 1.00f, 0.04f}}, // mids: yellow-green
-        {{0.35f, 1.00f, 0.08f}}, // upper mids: green
-        {{0.04f, 0.95f, 0.50f}}, // vocal body: green-teal
-        {{0.03f, 0.82f, 1.00f}}, // presence: cyan
-        {{0.08f, 0.42f, 1.00f}}, // attack: blue
-        {{0.42f, 0.14f, 1.00f}}, // highs: violet
-        {{1.00f, 0.10f, 0.64f}}  // air: pink/magenta
+        {{1.00f, 0.03f, 0.01f}}, // sub
+        {{1.00f, 0.10f, 0.01f}}, // deep bass
+        {{1.00f, 0.24f, 0.01f}}, // bass
+        {{1.00f, 0.43f, 0.01f}}, // upper bass
+        {{1.00f, 0.70f, 0.02f}}, // low mid
+        {{0.90f, 1.00f, 0.03f}}, // mids
+        {{0.28f, 1.00f, 0.06f}}, // upper mid
+        {{0.02f, 0.98f, 0.42f}}, // vocal body
+        {{0.02f, 0.82f, 1.00f}}, // presence
+        {{0.06f, 0.36f, 1.00f}}, // attack
+        {{0.42f, 0.10f, 1.00f}}, // highs
+        {{1.00f, 0.05f, 0.68f}}  // air
     }};
 
+    const float top = std::max(score[order[0]], 0.0001f);
+    std::array<float, 3> mixWeight{
+        1.00f,
+        0.58f * (score[order[1]] / top),
+        0.34f * (score[order[2]] / top)
+    };
+
+    // If a presence/high/air band is meaningfully active but narrowly misses
+    // the top three, let it tint the slice rather than being swallowed by a
+    // stack of adjacent bass bands.
+    std::size_t coolIndex = 8;
+    for (std::size_t i = 9; i < score.size(); ++i) {
+        if (score[i] > score[coolIndex]) coolIndex = i;
+    }
+    const float coolRatio = score[coolIndex] / top;
+    const bool addCoolAccent =
+        coolRatio >= 0.32f &&
+        coolIndex != order[0] && coolIndex != order[1] && coolIndex != order[2];
+
+    float weightSum = mixWeight[0] + mixWeight[1] + mixWeight[2];
     float r = 0.0f, g = 0.0f, b = 0.0f;
-    for (std::size_t i = 0; i < band.size(); ++i) {
-        r += band[i] * kColor[i][0];
-        g += band[i] * kColor[i][1];
-        b += band[i] * kColor[i][2];
+
+    for (std::size_t rank = 0; rank < 3; ++rank) {
+        const auto idx = order[rank];
+        const float w = mixWeight[rank];
+        r += w * kColor[idx][0];
+        g += w * kColor[idx][1];
+        b += w * kColor[idx][2];
     }
 
-    // Remove some common white component so broadband passages retain clear
-    // spectral colour instead of washing toward pale yellow.
+    if (addCoolAccent) {
+        const float w = 0.30f * coolRatio;
+        r += w * kColor[coolIndex][0];
+        g += w * kColor[coolIndex][1];
+        b += w * kColor[coolIndex][2];
+        weightSum += w;
+    }
+
+    r /= std::max(weightSum, 0.0001f);
+    g /= std::max(weightSum, 0.0001f);
+    b /= std::max(weightSum, 0.0001f);
+
+    // Increase saturation after the selective blend.
     const float common = std::min({r, g, b});
-    constexpr float kCommonRemoval = 0.30f;
+    constexpr float kCommonRemoval = 0.48f;
     r = std::max(0.0f, r - common * kCommonRemoval);
     g = std::max(0.0f, g - common * kCommonRemoval);
     b = std::max(0.0f, b - common * kCommonRemoval);
