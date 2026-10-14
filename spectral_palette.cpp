@@ -35,7 +35,7 @@ rgb_color color_for_point(const waveform_point& p) {
     static constexpr std::array<float, 12> kDisplayGain{
         1.00f, 1.02f, 1.04f, 1.03f,
         0.98f, 0.94f, 0.94f, 0.97f,
-        1.03f, 1.08f, 1.12f, 1.14f
+        1.03f, 1.08f, 1.15f, 1.18f
     };
 
     float total = 0.0001f;
@@ -59,8 +59,8 @@ rgb_color color_for_point(const waveform_point& p) {
         {{0.12f, 0.92f, 0.50f}}, // vocal body: green-teal
         {{0.05f, 0.76f, 1.00f}}, // presence: cyan
         {{0.10f, 0.40f, 1.00f}}, // attack: blue
-        {{0.46f, 0.16f, 1.00f}}, // highs: violet
-        {{0.90f, 0.10f, 0.72f}}  // air: pink/magenta
+        {{0.54f, 0.13f, 1.00f}}, // highs: slightly richer violet
+        {{0.98f, 0.08f, 0.80f}}  // air: slightly richer pink/magenta
     }};
 
     float r = 0.0f, g = 0.0f, b = 0.0f;
