@@ -2267,7 +2267,17 @@ private:
         m_reverseReleaseVisualLastTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
-        start_analysis(track);
+
+        // Stopping and pressing Play on the same track also arrives here as a
+        // new-track callback. Preserve the user's zoom/pan/follow state in that
+        // case; only reset the view when the actual track identity changes.
+        bool sameTrack = false;
+        if (!m_currentTrack.is_empty() && !track.is_empty()) {
+            sameTrack =
+                m_currentTrack->get_subsong_index() == track->get_subsong_index() &&
+                std::strcmp(m_currentTrack->get_path(), track->get_path()) == 0;
+        }
+        start_analysis(track, !sameTrack);
     }
     void on_playback_stop(play_control::t_stop_reason) override {
         auto transport = find_transport_service();
