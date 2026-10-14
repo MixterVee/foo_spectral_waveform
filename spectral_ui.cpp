@@ -885,6 +885,7 @@ private:
     }
 
     void center_on_playhead_once() {
+        m_resumeVisualAnchorActive = false;
         if (m_wnd == nullptr || m_viewSpan >= 0.9995) return;
         double positionFrac = 0.0;
         if (!playback_fraction(positionFrac)) return;
