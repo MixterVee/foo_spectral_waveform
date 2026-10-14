@@ -262,8 +262,20 @@ private:
         if (msg == nullptr || msg->message != WM_KEYDOWN || msg->wParam != VK_RETURN)
             return false;
 
-        // Leave Enter alone while the user is typing in an edit control.
-        if (keyboard_shortcut_manager::is_typing_message(msg)) return false;
+        // Leave Enter alone only when keyboard focus is actually inside a
+        // text-edit control. foobar's is_typing_message() helper treats Enter as
+        // a typing key everywhere (including playlists), which caused our global
+        // transport shortcut to be skipped until the waveform itself had focus.
+        wchar_t className[64]{};
+        if (msg->hwnd != nullptr &&
+            GetClassNameW(msg->hwnd, className,
+                static_cast<int>(std::size(className))) > 0) {
+            const bool editControl =
+                _wcsicmp(className, L"Edit") == 0 ||
+                _wcsnicmp(className, L"RichEdit", 8) == 0 ||
+                _wcsnicmp(className, L"RICHEDIT", 8) == 0;
+            if (editControl) return false;
+        }
 
         // No modified Enter combinations; those remain available to foobar.
         if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
