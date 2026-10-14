@@ -4,7 +4,7 @@
 
 DECLARE_COMPONENT_VERSION(
     "Spectral Waveform",
-    "0.6.1-test9 Cohesive 12-Band Renderer",
+    "0.6.1-test10 Balanced 12-Band Renderer",
     "Serato-inspired spectral waveform for foobar2000.\n"
     "Twelve-band Serato-style spectral coloring, zoom and follow modes, time markers, persistent analysis cache, and stem-aware post-DSP updates.\n"
     "Mirrors Stem Separator controls including cache settings, exports, pre-cache and backend benchmark; drag/hold audition is intentionally muted and the seek is committed on release."
@@ -17,7 +17,7 @@ namespace {
 class spectral_initquit : public initquit {
 public:
     void on_init() override {
-        console::print("foo_spectral_waveform: v0.6.1-test9 loaded");
+        console::print("foo_spectral_waveform: v0.6.1-test10 loaded");
     }
 
     void on_quit() override {}
