@@ -495,12 +495,18 @@ waveform_point blend_point(const waveform_point& a, const waveform_point& b, dou
     waveform_point out{};
     out.peak = static_cast<std::uint16_t>(std::lround(a.peak * inv + b.peak * mix));
     out.rms = static_cast<std::uint16_t>(std::lround(a.rms * inv + b.rms * mix));
-    out.sub_bass = static_cast<std::uint8_t>(std::lround(a.sub_bass * inv + b.sub_bass * mix));
+    out.sub = static_cast<std::uint8_t>(std::lround(a.sub * inv + b.sub * mix));
+    out.deep_bass = static_cast<std::uint8_t>(std::lround(a.deep_bass * inv + b.deep_bass * mix));
     out.bass = static_cast<std::uint8_t>(std::lround(a.bass * inv + b.bass * mix));
+    out.upper_bass = static_cast<std::uint8_t>(std::lround(a.upper_bass * inv + b.upper_bass * mix));
     out.low_mid = static_cast<std::uint8_t>(std::lround(a.low_mid * inv + b.low_mid * mix));
     out.mids = static_cast<std::uint8_t>(std::lround(a.mids * inv + b.mids * mix));
-    out.high_mid = static_cast<std::uint8_t>(std::lround(a.high_mid * inv + b.high_mid * mix));
-    out.treble = static_cast<std::uint8_t>(std::lround(a.treble * inv + b.treble * mix));
+    out.upper_mid = static_cast<std::uint8_t>(std::lround(a.upper_mid * inv + b.upper_mid * mix));
+    out.vocal_body = static_cast<std::uint8_t>(std::lround(a.vocal_body * inv + b.vocal_body * mix));
+    out.presence = static_cast<std::uint8_t>(std::lround(a.presence * inv + b.presence * mix));
+    out.attack = static_cast<std::uint8_t>(std::lround(a.attack * inv + b.attack * mix));
+    out.highs = static_cast<std::uint8_t>(std::lround(a.highs * inv + b.highs * mix));
+    out.air = static_cast<std::uint8_t>(std::lround(a.air * inv + b.air * mix));
     return out;
 }
 
@@ -538,35 +544,44 @@ bool aggregate_from_preview(
     end = std::max(begin + 1, std::min(end, count));
 
     std::uint64_t rms = 0;
-    std::uint64_t subBass = 0;
-    std::uint64_t bass = 0;
-    std::uint64_t lowMid = 0;
-    std::uint64_t mids = 0;
-    std::uint64_t highMid = 0;
-    std::uint64_t treble = 0;
+    std::uint64_t sub = 0, deepBass = 0, bass = 0, upperBass = 0;
+    std::uint64_t lowMid = 0, mids = 0, upperMid = 0, vocalBody = 0;
+    std::uint64_t presence = 0, attack = 0, highs = 0, air = 0;
     std::uint16_t peak = 0;
 
     for (size_t i = begin; i < end; ++i) {
         const waveform_point& p = preview->points[i];
         peak = std::max(peak, p.peak);
         rms += p.rms;
-        subBass += p.sub_bass;
+        sub += p.sub;
+        deepBass += p.deep_bass;
         bass += p.bass;
+        upperBass += p.upper_bass;
         lowMid += p.low_mid;
         mids += p.mids;
-        highMid += p.high_mid;
-        treble += p.treble;
+        upperMid += p.upper_mid;
+        vocalBody += p.vocal_body;
+        presence += p.presence;
+        attack += p.attack;
+        highs += p.highs;
+        air += p.air;
     }
 
     const std::uint64_t n = static_cast<std::uint64_t>(end - begin);
     out.peak = peak;
     out.rms = static_cast<std::uint16_t>(rms / n);
-    out.sub_bass = static_cast<std::uint8_t>(subBass / n);
+    out.sub = static_cast<std::uint8_t>(sub / n);
+    out.deep_bass = static_cast<std::uint8_t>(deepBass / n);
     out.bass = static_cast<std::uint8_t>(bass / n);
+    out.upper_bass = static_cast<std::uint8_t>(upperBass / n);
     out.low_mid = static_cast<std::uint8_t>(lowMid / n);
     out.mids = static_cast<std::uint8_t>(mids / n);
-    out.high_mid = static_cast<std::uint8_t>(highMid / n);
-    out.treble = static_cast<std::uint8_t>(treble / n);
+    out.upper_mid = static_cast<std::uint8_t>(upperMid / n);
+    out.vocal_body = static_cast<std::uint8_t>(vocalBody / n);
+    out.presence = static_cast<std::uint8_t>(presence / n);
+    out.attack = static_cast<std::uint8_t>(attack / n);
+    out.highs = static_cast<std::uint8_t>(highs / n);
+    out.air = static_cast<std::uint8_t>(air / n);
     return true;
 }
 
