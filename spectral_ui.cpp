@@ -2268,18 +2268,55 @@ private:
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
 
-        // Stopping and pressing Play on the same track also arrives here as a
-        // new-track callback. Preserve the user's zoom/pan/follow state in that
-        // case; only reset the view when the actual track identity changes.
-        bool sameTrack = false;
+        // Test15: preserve the stopped view explicitly as well as comparing the
+        // current handle. This makes Stop -> Play on the same song robust even
+        // if foobar refreshes the now-playing handle between callbacks.
+        bool sameCurrentTrack = false;
         if (!m_currentTrack.is_empty() && !track.is_empty()) {
-            sameTrack =
+            sameCurrentTrack =
                 m_currentTrack->get_subsong_index() == track->get_subsong_index() &&
                 std::strcmp(m_currentTrack->get_path(), track->get_path()) == 0;
         }
-        start_analysis(track, !sameTrack);
+
+        bool sameStoppedTrack = false;
+        if (m_stoppedViewValid && !track.is_empty()) {
+            sameStoppedTrack =
+                m_stoppedTrackSubsong == track->get_subsong_index() &&
+                m_stoppedTrackPath == track->get_path();
+        }
+
+        const bool preserveView = sameCurrentTrack || sameStoppedTrack;
+        start_analysis(track, !preserveView);
+
+        if (sameStoppedTrack) {
+            m_viewStart = m_stoppedViewStart;
+            m_viewSpan = m_stoppedViewSpan;
+            m_followPlayhead = m_stoppedFollowPlayhead;
+            m_followMode = m_stoppedFollowMode;
+            clamp_view();
+            invalidate_all();
+        }
+
+        // A different song consumes the saved stopped view so it can never leak
+        // into later tracks. Replaying the same song keeps it available for the
+        // next Stop -> Play cycle until on_playback_stop refreshes the snapshot.
+        if (!sameStoppedTrack) m_stoppedViewValid = false;
     }
     void on_playback_stop(play_control::t_stop_reason) override {
+        // Snapshot the user's exact view before any stop-side cleanup. This is
+        // intentionally in-memory only: it survives Stop -> Play, not app exit.
+        if (!m_currentTrack.is_empty()) {
+            m_stoppedTrackPath = m_currentTrack->get_path();
+            m_stoppedTrackSubsong = m_currentTrack->get_subsong_index();
+            m_stoppedViewStart = m_viewStart;
+            m_stoppedViewSpan = m_viewSpan;
+            m_stoppedFollowPlayhead = m_followPlayhead;
+            m_stoppedFollowMode = m_followMode;
+            m_stoppedViewValid = true;
+        } else {
+            m_stoppedViewValid = false;
+        }
+
         auto transport = find_transport_service();
         if (!transport.is_empty()) { try { transport->cancel_transport(); } catch (...) {} }
         m_touchHoldLatched = false;
@@ -2396,6 +2433,16 @@ private:
     mutable std::mutex m_waveformMutex;
     std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
     metadb_handle_ptr m_currentTrack;
+
+    // Explicit Stop -> Play view snapshot for the same track.
+    bool m_stoppedViewValid = false;
+    std::string m_stoppedTrackPath;
+    t_uint32 m_stoppedTrackSubsong = 0;
+    double m_stoppedViewStart = 0.0;
+    double m_stoppedViewSpan = 1.0;
+    bool m_stoppedFollowPlayhead = false;
+    follow_mode m_stoppedFollowMode = follow_mode::centered;
+
     std::thread m_worker;
     std::shared_ptr<abort_callback_impl> m_abort;
     std::atomic_bool m_analyzing{false};
