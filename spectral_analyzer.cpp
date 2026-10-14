@@ -133,21 +133,37 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
         mean[i] = bins[i] > 0 ? energy[i] / static_cast<double>(bins[i]) : 0.0;
     }
 
-    const double mean_total =
-        mean[0] + mean[1] + mean[2] + mean[3] + mean[4] + mean[5] + 1.0e-30;
+    // Music spectra naturally fall with frequency, so raw mean power still
+    // makes the lowest bands dominate almost every frame. Apply a partial
+    // pink-spectrum compensation before normalising. The exponent is kept
+    // below 1.0 so the waveform remains warm overall rather than turning into
+    // a uniformly cool rainbow.
+    static constexpr std::array<double, 6> center_hz{
+        42.426, 150.0, 418.33, 1183.22, 3464.10, 10954.45
+    };
+    constexpr double kTiltReferenceHz = 250.0;
+    constexpr double kTiltExponent = 0.78;
 
+    std::array<double, 6> tilted{};
+    double tilted_total = 1.0e-30;
+    for (std::size_t i = 0; i < tilted.size(); ++i) {
+        const double tilt = std::pow(center_hz[i] / kTiltReferenceHz, kTiltExponent);
+        tilted[i] = mean[i] * tilt;
+        tilted_total += tilted[i];
+    }
+
+    // Mild dynamic compression lets short presence/air transients influence
+    // colour without overpowering the bass and low-mid foundation.
     static constexpr std::array<double, 6> gain{
-        0.88, 0.96, 1.00, 1.08, 1.22, 1.48
+        1.06, 1.04, 1.00, 1.00, 1.04, 1.10
     };
-    static constexpr std::array<double, 6> curve{
-        0.82, 0.82, 0.80, 0.78, 0.74, 0.68
-    };
+    constexpr double kShareCurve = 0.80;
 
     std::array<double, 6> weight{};
     double weight_total = 1.0e-30;
     for (std::size_t i = 0; i < weight.size(); ++i) {
-        const double share = std::clamp(mean[i] / mean_total, 0.0, 1.0);
-        weight[i] = gain[i] * std::pow(share, curve[i]);
+        const double share = std::clamp(tilted[i] / tilted_total, 0.0, 1.0);
+        weight[i] = gain[i] * std::pow(share, kShareCurve);
         weight_total += weight[i];
     }
 
