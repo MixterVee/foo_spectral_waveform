@@ -1485,6 +1485,7 @@ private:
         double positionFrac = 0.0;
         auto pc = playback_control::get();
         if (pc->is_playing() &&
+            !pc->is_paused() &&
             pc->playback_can_seek() &&
             playback_fraction(positionFrac)) {
 
