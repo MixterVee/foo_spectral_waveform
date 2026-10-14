@@ -260,6 +260,9 @@ private:
         switch (msg) {
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
+        case WM_CHAR:
+            if (wp == VK_RETURN) return 0;
+            break;
         case WM_TIMER: {
             remember_live_playback_position();
             apply_pending_restart_seek();
@@ -291,13 +294,24 @@ private:
             show_context_menu(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_GETDLGCODE:
-            return DLGC_WANTARROWS | DLGC_WANTCHARS;
+            return DLGC_WANTALLKEYS | DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_KEYDOWN:
             switch (wp) {
             case VK_RETURN: {
                 const bool repeat = (lp & (static_cast<LPARAM>(1) << 30)) != 0;
                 if (repeat) return 0;
-                playback_control::get()->play_or_pause();
+
+                auto pc = playback_control::get();
+                if (pc->is_playing()) {
+                    // is_playing() remains true while paused, so explicitly
+                    // toggle pause state rather than invoking foobar's generic
+                    // Play action (which can restart the selected track).
+                    pc->pause(!pc->is_paused());
+                } else {
+                    // Stopped: start normally. Same-track Stop -> Play position
+                    // restoration is handled by on_playback_new_track().
+                    pc->start(playback_control::track_command_play, false);
+                }
                 return 0;
             }
             case VK_SPACE: {
