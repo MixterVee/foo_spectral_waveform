@@ -329,10 +329,8 @@ private:
                 auto pc = playback_control::get();
                 if (!pc->is_playing()) {
                     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                    const double stepSeconds = ctrl ? 0.1 : (shift ? 5.0 : 1.0);
                     nudge_stopped_playhead(
-                        wp == VK_LEFT ? -stepSeconds : stepSeconds);
+                        wp == VK_LEFT ? -1 : 1, ctrl);
                 } else {
                     pan_from_keyboard(wp == VK_LEFT ? -1 : 1);
                 }
@@ -2207,20 +2205,23 @@ private:
         invalidate_playhead();
     }
 
-    void nudge_stopped_playhead(double deltaSeconds) {
-        if (deltaSeconds == 0.0) return;
+    void nudge_stopped_playhead(int direction, bool fine) {
+        if (direction == 0) return;
 
         auto pc = playback_control::get();
         if (pc->is_playing()) return;
 
-        auto waveform = waveform_snapshot();
-        if (!waveform || waveform->duration_seconds <= 0.0) return;
+        // Cursor travel is defined by the current visible window, not a fixed
+        // number of seconds. This makes the arrows naturally become more precise
+        // as the waveform is zoomed in.
+        const double visibleStep = m_viewSpan * (fine ? 0.001 : 0.01);
 
         double position = m_stoppedPositionValid
             ? m_stoppedPositionFraction
             : (m_lastPlaybackFractionValid ? m_lastPlaybackFraction : 0.0);
         position = std::clamp(
-            position + deltaSeconds / waveform->duration_seconds, 0.0, 1.0);
+            position + static_cast<double>(direction) * visibleStep,
+            0.0, 1.0);
 
         m_stoppedPositionFraction = position;
         m_stoppedPositionValid = true;
