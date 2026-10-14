@@ -12,35 +12,45 @@ static float clamp01(float v) {
 rgb_color color_for_point(const waveform_point& p) {
     const float peak = p.peak / 65535.0f;
 
-    // Six normalized spectral regions from low to high frequency.
-    std::array<float, 6> band{
-        p.sub_bass / 255.0f,
+    std::array<float, 12> band{
+        p.sub / 255.0f,
+        p.deep_bass / 255.0f,
         p.bass / 255.0f,
+        p.upper_bass / 255.0f,
         p.low_mid / 255.0f,
         p.mids / 255.0f,
-        p.high_mid / 255.0f,
-        p.treble / 255.0f
+        p.upper_mid / 255.0f,
+        p.vocal_body / 255.0f,
+        p.presence / 255.0f,
+        p.attack / 255.0f,
+        p.highs / 255.0f,
+        p.air / 255.0f
     };
 
-    // Emphasize the strongest one or two regions so broadband music stays
-    // vividly coloured instead of washing toward a common yellow/grey.
-    float weight_total = 0.0001f;
+    // Favor the strongest regions enough to keep colours vivid, while retaining
+    // neighboring-band mixtures for smooth musical transitions.
+    float total = 0.0001f;
     for (auto& v : band) {
-        v = std::pow(clamp01(v), 1.24f);
-        weight_total += v;
+        v = std::pow(clamp01(v), 1.20f);
+        total += v;
     }
-    for (auto& v : band) v /= weight_total;
+    for (auto& v : band) v /= total;
 
-    // Serato-inspired frequency anchors:
-    // sub -> red, bass -> orange, low-mid -> yellow,
-    // mid -> green, presence -> cyan/blue, air -> violet/pink.
-    static constexpr std::array<std::array<float, 3>, 6> kColor{{
-        {{1.00f, 0.05f, 0.02f}},
-        {{1.00f, 0.30f, 0.02f}},
-        {{1.00f, 0.88f, 0.04f}},
-        {{0.10f, 1.00f, 0.13f}},
-        {{0.03f, 0.73f, 1.00f}},
-        {{0.62f, 0.08f, 1.00f}}
+    // Serato-inspired frequency anchors from warm lows through cool highs and
+    // violet/pink air. Adjacent bands interpolate naturally by RGB mixing.
+    static constexpr std::array<std::array<float, 3>, 12> kColor{{
+        {{1.00f, 0.04f, 0.02f}}, // sub: red
+        {{1.00f, 0.12f, 0.02f}}, // deep bass: red-orange
+        {{1.00f, 0.28f, 0.02f}}, // bass: orange
+        {{1.00f, 0.48f, 0.02f}}, // upper bass: amber
+        {{1.00f, 0.76f, 0.03f}}, // low mid: gold
+        {{0.92f, 1.00f, 0.04f}}, // mids: yellow-green
+        {{0.35f, 1.00f, 0.08f}}, // upper mids: green
+        {{0.04f, 0.95f, 0.50f}}, // vocal body: green-teal
+        {{0.03f, 0.82f, 1.00f}}, // presence: cyan
+        {{0.08f, 0.42f, 1.00f}}, // attack: blue
+        {{0.42f, 0.14f, 1.00f}}, // highs: violet
+        {{1.00f, 0.10f, 0.64f}}  // air: pink/magenta
     }};
 
     float r = 0.0f, g = 0.0f, b = 0.0f;
@@ -50,10 +60,10 @@ rgb_color color_for_point(const waveform_point& p) {
         b += band[i] * kColor[i][2];
     }
 
-    // Remove part of the shared white component to keep adjacent frequency
-    // mixtures saturated while still allowing smooth transitions.
+    // Remove some common white component so broadband passages retain clear
+    // spectral colour instead of washing toward pale yellow.
     const float common = std::min({r, g, b});
-    constexpr float kCommonRemoval = 0.34f;
+    constexpr float kCommonRemoval = 0.30f;
     r = std::max(0.0f, r - common * kCommonRemoval);
     g = std::max(0.0f, g - common * kCommonRemoval);
     b = std::max(0.0f, b - common * kCommonRemoval);
@@ -63,7 +73,6 @@ rgb_color color_for_point(const waveform_point& p) {
     g /= maxc;
     b /= maxc;
 
-    // Keep quieter details colourful while loudness still controls brightness.
     const float brightness =
         0.25f + 0.75f * std::pow(clamp01(peak), 0.42f);
 
