@@ -7,18 +7,6 @@ on:
 jobs:
   build:
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            platform: x64
-            sdkdir: x64
-            outdir: x64
-          - arch: x86
-            platform: Win32
-            sdkdir: Win32
-            outdir: x86
 
     steps:
       - name: Checkout project
@@ -32,48 +20,73 @@ jobs:
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build PFC
+      - name: Build PFC x64
         shell: pwsh
         run: |
-          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\${{ matrix.sdkdir }}\Release\"
+          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\x64\Release\"
 
-      - name: Build foobar2000 SDK
+      - name: Build foobar2000 SDK x64
         shell: pwsh
         run: |
-          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\${{ matrix.sdkdir }}\Release\"
+          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\x64\Release\"
 
-      - name: Build component client
+      - name: Build component client x64
         shell: pwsh
         run: |
-          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\${{ matrix.sdkdir }}\Release\"
+          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\x64\Release\"
 
-      - name: Build foo_spectral_waveform
+      - name: Build PFC Win32
         shell: pwsh
         run: |
-          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:BuildProjectReferences=false
+          msbuild "sdk\pfc\pfc.vcxproj" /m /p:Configuration=Release /p:Platform=Win32 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\pfc\Win32\Release\"
 
-      - name: Package fb2k-component
+      - name: Build foobar2000 SDK Win32
         shell: pwsh
         run: |
-          $out = "out\${{ matrix.outdir }}\foo_spectral_waveform.dll"
-          if (!(Test-Path $out)) {
-            throw "Built DLL not found: $out"
+          msbuild "sdk\foobar2000\SDK\foobar2000_SDK.vcxproj" /m /p:Configuration=Release /p:Platform=Win32 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\SDK\Win32\Release\"
+
+      - name: Build component client Win32
+        shell: pwsh
+        run: |
+          msbuild "sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj" /m /p:Configuration=Release /p:Platform=Win32 /p:OutDir="$env:GITHUB_WORKSPACE\sdk\foobar2000\foobar2000_component_client\Win32\Release\"
+
+      - name: Build Spectral Waveform x64
+        shell: pwsh
+        run: |
+          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=x64 /p:BuildProjectReferences=false
+
+      - name: Build Spectral Waveform Win32
+        shell: pwsh
+        run: |
+          msbuild "foo_spectral_waveform.vcxproj" /m /p:Configuration=Release /p:Platform=Win32 /p:BuildProjectReferences=false
+
+      - name: Package universal fb2k-component
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) {
+            throw "Built x64 DLL not found."
+          }
+          if (!(Test-Path "out\x86\foo_spectral_waveform.dll")) {
+            throw "Built Win32 DLL not found."
           }
 
-          $stage = "stage\${{ matrix.outdir }}"
-          New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item $out "$stage\foo_spectral_waveform.dll"
+          Remove-Item "stage" -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
 
-          $zip = "foo_spectral_waveform-${{ matrix.arch }}.zip"
-          $component = "foo_spectral_waveform-${{ matrix.arch }}.fb2k-component"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          if (Test-Path $component) { Remove-Item $component -Force }
+          # 32-bit component DLL belongs at the package root.
+          Copy-Item "out\x86\foo_spectral_waveform.dll" "stage\foo_spectral_waveform.dll"
 
-          7z a -tzip $zip ".\$stage\foo_spectral_waveform.dll"
-          Rename-Item $zip $component
+          # 64-bit component DLL belongs in the x64 subdirectory.
+          Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
 
-      - name: Upload component
+          Remove-Item "foo_spectral_waveform.zip" -Force -ErrorAction SilentlyContinue
+          Remove-Item "foo_spectral_waveform.fb2k-component" -Force -ErrorAction SilentlyContinue
+
+          Compress-Archive -Path "stage\*" -DestinationPath "foo_spectral_waveform.zip" -Force
+          Rename-Item "foo_spectral_waveform.zip" "foo_spectral_waveform.fb2k-component"
+
+      - name: Upload universal component
         uses: actions/upload-artifact@v4
         with:
-          name: foo_spectral_waveform-native-${{ matrix.arch }}
-          path: foo_spectral_waveform-${{ matrix.arch }}.fb2k-component
+          name: foo_spectral_waveform-universal
+          path: foo_spectral_waveform.fb2k-component
