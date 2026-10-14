@@ -33,9 +33,9 @@ rgb_color color_for_point(const waveform_point& p) {
     // spectral identity. This produces broader, more cohesive colour regions
     // instead of the neon-striped look of test8.
     static constexpr std::array<float, 12> kDisplayGain{
-        0.94f, 0.96f, 0.98f, 1.00f,
-        1.00f, 1.00f, 1.01f, 1.02f,
-        1.04f, 1.06f, 1.09f, 1.12f
+        1.00f, 1.02f, 1.04f, 1.03f,
+        0.98f, 0.94f, 0.94f, 0.97f,
+        1.03f, 1.08f, 1.12f, 1.14f
     };
 
     float total = 0.0001f;
@@ -52,15 +52,15 @@ rgb_color color_for_point(const waveform_point& p) {
         {{1.00f, 0.05f, 0.02f}}, // sub: red
         {{1.00f, 0.15f, 0.02f}}, // deep bass
         {{1.00f, 0.30f, 0.02f}}, // bass
-        {{1.00f, 0.50f, 0.02f}}, // upper bass
-        {{1.00f, 0.76f, 0.04f}}, // low mid
-        {{0.92f, 1.00f, 0.06f}}, // mids
-        {{0.38f, 1.00f, 0.10f}}, // upper mids
-        {{0.08f, 0.96f, 0.48f}}, // vocal body
-        {{0.06f, 0.80f, 1.00f}}, // presence
-        {{0.12f, 0.46f, 1.00f}}, // attack
-        {{0.44f, 0.18f, 1.00f}}, // highs
-        {{0.88f, 0.12f, 0.70f}}  // air: softened pink/magenta
+        {{1.00f, 0.48f, 0.02f}}, // upper bass
+        {{1.00f, 0.68f, 0.03f}}, // low mid: warmer amber
+        {{1.00f, 0.92f, 0.04f}}, // mids: yellow, less green
+        {{0.58f, 1.00f, 0.08f}}, // upper mids: yellow-green
+        {{0.12f, 0.92f, 0.50f}}, // vocal body: green-teal
+        {{0.05f, 0.76f, 1.00f}}, // presence: cyan
+        {{0.10f, 0.40f, 1.00f}}, // attack: blue
+        {{0.46f, 0.16f, 1.00f}}, // highs: violet
+        {{0.90f, 0.10f, 0.72f}}  // air: pink/magenta
     }};
 
     float r = 0.0f, g = 0.0f, b = 0.0f;
@@ -69,6 +69,14 @@ rgb_color color_for_point(const waveform_point& p) {
         g += band[i] * kColor[i][1];
         b += band[i] * kColor[i][2];
     }
+
+    // Test9 still leaned too yellow/green. Apply a small split balance rather
+    // than increasing saturation: a little more warm red and cool blue, with a
+    // slight green reduction, keeps the image cohesive while restoring the
+    // Serato-like orange and blue/purple presence.
+    r *= 1.05f;
+    g *= 0.94f;
+    b *= 1.04f;
 
     // Moderate saturation: stronger than a plain RGB average, but much softer
     // than test8 so neighboring time slices visually belong together.
