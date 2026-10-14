@@ -261,7 +261,8 @@ private:
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
         case WM_TIMER: {
-            apply_pending_click_start();
+            remember_live_playback_position();
+            apply_pending_restart_seek();
             update_reverse_visual_clock();
             update_scrub_motion_gate();
             update_transport_release_wait();
@@ -1027,9 +1028,13 @@ private:
         }
 
         auto pc = playback_control::get();
-        if (!pc->is_playing()) return -1;
         double positionFrac = 0.0;
-        if (!playback_fraction(positionFrac)) return -1;
+        if (!pc->is_playing()) {
+            if (!m_stoppedPositionValid) return -1;
+            positionFrac = std::clamp(m_stoppedPositionFraction, 0.0, 1.0);
+        } else if (!playback_fraction(positionFrac)) {
+            return -1;
+        }
         if (positionFrac < m_viewStart || positionFrac > view_end()) return -1;
         const double visibleFrac = (positionFrac - m_viewStart) / m_viewSpan;
         return static_cast<int>(visibleFrac * std::max(0, width - 1));
@@ -2147,29 +2152,41 @@ private:
         EndPaint(m_wnd, &ps);
     }
 
-    void apply_pending_click_start() {
-        if (!m_pendingClickStart) return;
+    void remember_live_playback_position() {
+        auto pc = playback_control::get();
+        if (!pc->is_playing()) return;
+
+        double positionFrac = 0.0;
+        if (!playback_fraction(positionFrac)) return;
+        m_lastPlaybackFraction = std::clamp(positionFrac, 0.0, 1.0);
+        m_lastPlaybackFractionValid = true;
+    }
+
+    void apply_pending_restart_seek() {
+        if (!m_pendingRestartSeek) return;
 
         auto pc = playback_control::get();
         if (!pc->is_playing()) return;
 
         metadb_handle_ptr nowPlaying;
         if (!pc->get_now_playing(nowPlaying) || nowPlaying.is_empty()) return;
-        const bool samePendingTrack =
-            nowPlaying->get_subsong_index() == m_pendingClickTrackSubsong &&
-            m_pendingClickTrackPath == nowPlaying->get_path();
-        if (!samePendingTrack) return;
+        const bool sameTrack =
+            nowPlaying->get_subsong_index() == m_pendingRestartTrackSubsong &&
+            m_pendingRestartTrackPath == nowPlaying->get_path();
+        if (!sameTrack) {
+            m_pendingRestartSeek = false;
+            return;
+        }
 
         const double length = pc->playback_get_length_ex();
         if (length <= 0.0 || !pc->playback_can_seek()) return;
 
-        const double target = std::clamp(m_pendingClickFraction, 0.0, 1.0);
-        m_pendingClickStart = false;
+        const double target = std::clamp(m_pendingRestartFraction, 0.0, 1.0);
+        m_pendingRestartSeek = false;
         pc->playback_seek(target * length);
 
-        // Stopped click-to-play starts paused deliberately so no audio from 0:00
-        // leaks out before the seek is accepted. Resume only after the seek.
-        if (pc->is_paused()) pc->pause(false);
+        m_lastPlaybackFraction = target;
+        m_lastPlaybackFractionValid = true;
         if (m_followPlayhead) recenter_on_playhead();
         else invalidate_playhead();
     }
@@ -2192,22 +2209,24 @@ private:
             const double length = pc->playback_get_length_ex();
             if (length <= 0.0) return;
 
+            // Preserve the existing transport state: playing stays playing,
+            // paused stays paused.
             pc->playback_seek(trackFrac * length);
-            if (pc->is_paused()) pc->pause(false);
+            m_lastPlaybackFraction = trackFrac;
+            m_lastPlaybackFractionValid = true;
             if (m_followPlayhead) recenter_on_playhead();
             else invalidate_playhead();
             return;
         }
 
-        // A single click on a stopped waveform means "play from here". Start
-        // playback paused, then the UI timer applies the seek as soon as foobar
-        // exposes the new playback length, and finally resumes.
+        // Stopped click = move the playhead only. Playback remains stopped until
+        // the user explicitly presses Play.
         if (m_currentTrack.is_empty()) return;
-        m_pendingClickFraction = trackFrac;
-        m_pendingClickTrackPath = m_currentTrack->get_path();
-        m_pendingClickTrackSubsong = m_currentTrack->get_subsong_index();
-        m_pendingClickStart = true;
-        pc->start(playback_control::track_command_play, true);
+        m_stoppedPositionFraction = trackFrac;
+        m_stoppedPositionValid = true;
+        m_lastPlaybackFraction = trackFrac;
+        m_lastPlaybackFractionValid = true;
+        invalidate_playhead();
     }
 
     void stop_analysis() {
@@ -2337,36 +2356,45 @@ private:
                 m_stoppedTrackPath == track->get_path();
         }
 
-        // If click-to-play somehow starts a different track, do not leave that
-        // unrelated track paused waiting for a pending seek that can never match.
-        if (m_pendingClickStart && !track.is_empty()) {
-            const bool pendingMatches =
-                m_pendingClickTrackSubsong == track->get_subsong_index() &&
-                m_pendingClickTrackPath == track->get_path();
-            if (!pendingMatches) {
-                m_pendingClickStart = false;
-                auto pc = playback_control::get();
-                if (pc->is_playing() && pc->is_paused()) pc->pause(false);
-            }
+        const bool preserveView = sameCurrentTrack || sameStoppedTrack;
+
+        // If the user pressed Play after an explicit Stop, seek back to the
+        // stored stopped playhead once foobar has re-opened the same track.
+        if (sameStoppedTrack && m_stoppedPositionValid) {
+            m_pendingRestartSeek = true;
+            m_pendingRestartFraction = m_stoppedPositionFraction;
+            m_pendingRestartTrackPath = track->get_path();
+            m_pendingRestartTrackSubsong = track->get_subsong_index();
+        } else {
+            m_pendingRestartSeek = false;
         }
 
-        const bool preserveView = sameCurrentTrack || sameStoppedTrack;
         start_analysis(track, !preserveView);
 
-        // A genuinely different song resets normally and consumes the stopped
-        // identity. Same-song restarts keep the current live view untouched.
-        if (!sameStoppedTrack) m_stoppedTrackValid = false;
+        // A genuinely different song resets normally and clears the old stopped
+        // transport position so it cannot leak into another track.
+        if (!sameStoppedTrack) {
+            m_stoppedTrackValid = false;
+            m_stoppedPositionValid = false;
+            m_lastPlaybackFractionValid = false;
+        }
     }
-    void on_playback_stop(play_control::t_stop_reason) override {
-        // Remember only which track was stopped. Do NOT snapshot zoom/pan here:
-        // the user may continue changing the view while stopped, and that latest
-        // visible state is what the next Play must preserve.
-        if (!m_currentTrack.is_empty()) {
+    void on_playback_stop(play_control::t_stop_reason reason) override {
+        // Explicit Stop remembers both the track identity and the latest live
+        // playhead position. Zoom/pan/follow are NOT snapshotted here; whatever
+        // the user changes while stopped remains the authoritative view.
+        if (reason == play_control::stop_reason_user && !m_currentTrack.is_empty()) {
             m_stoppedTrackPath = m_currentTrack->get_path();
             m_stoppedTrackSubsong = m_currentTrack->get_subsong_index();
             m_stoppedTrackValid = true;
-        } else {
+            if (m_lastPlaybackFractionValid) {
+                m_stoppedPositionFraction =
+                    std::clamp(m_lastPlaybackFraction, 0.0, 1.0);
+                m_stoppedPositionValid = true;
+            }
+        } else if (reason != play_control::stop_reason_starting_another) {
             m_stoppedTrackValid = false;
+            m_stoppedPositionValid = false;
         }
 
         auto transport = find_transport_service();
@@ -2388,6 +2416,8 @@ private:
         invalidate_all(false);
     }
     void on_playback_seek(double) override {
+        remember_live_playback_position();
+
         // Continuous seeks generated by a centered grab must not fight the user's
         // drag by recentering the view on every seek callback.
         if (m_centerScrubbing || m_touchHoldLatched || reverse_active() ||
@@ -2408,6 +2438,7 @@ private:
         invalidate_frame();
     }
     void on_playback_time(double) override {
+        remember_live_playback_position();
         if (!m_followPlayhead) invalidate_playhead();
     }
 
@@ -2492,12 +2523,18 @@ private:
     std::string m_stoppedTrackPath;
     t_uint32 m_stoppedTrackSubsong = 0;
 
-    // Single-click on a stopped waveform: start paused, seek when playback is
-    // actually ready, then resume from the clicked timeline position.
-    bool m_pendingClickStart = false;
-    double m_pendingClickFraction = 0.0;
-    std::string m_pendingClickTrackPath;
-    t_uint32 m_pendingClickTrackSubsong = 0;
+    // Visible/remembered transport cursor while playback is stopped.
+    bool m_stoppedPositionValid = false;
+    double m_stoppedPositionFraction = 0.0;
+    bool m_lastPlaybackFractionValid = false;
+    double m_lastPlaybackFraction = 0.0;
+
+    // External Play after Stop reopens the track at 0:00; seek back to the stored
+    // stopped position as soon as the playback instance is seekable.
+    bool m_pendingRestartSeek = false;
+    double m_pendingRestartFraction = 0.0;
+    std::string m_pendingRestartTrackPath;
+    t_uint32 m_pendingRestartTrackSubsong = 0;
 
     std::thread m_worker;
     std::shared_ptr<abort_callback_impl> m_abort;
