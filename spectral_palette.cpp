@@ -27,13 +27,15 @@ rgb_color color_for_point(const waveform_point& p) {
         p.air / 255.0f
     };
 
-    // Test13: preserve Test12's upper-band visibility, but restore more of the
-    // orange/yellow/green midrange seen in the Serato reference. This is still
-    // renderer-only; the twelve-band analyzer and cached data remain unchanged.
+    // Test14: fine-tune Test13 against the Serato reference. Pull some weight
+    // out of the orange-heavy upper-bass/low-mid area, restore a little pure
+    // red at the bottom, lift yellow through the middle, keep green/blue/violet
+    // stable, trim cyan slightly, and bring back more pink from the air band.
+    // Analyzer and cached twelve-band data are unchanged.
     static constexpr std::array<float, 12> kDisplayGain{
-        0.90f, 0.93f, 0.96f, 0.98f,
-        1.00f, 0.97f, 0.98f, 1.01f,
-        1.18f, 1.24f, 1.38f, 1.48f
+        0.94f, 0.93f, 0.95f, 0.95f,
+        0.97f, 1.02f, 1.00f, 1.01f,
+        1.12f, 1.24f, 1.38f, 1.58f
     };
 
     float total = 0.0001f;
@@ -43,22 +45,22 @@ rgb_color color_for_point(const waveform_point& p) {
     }
     for (auto& v : band) v /= total;
 
-    // Warmer low anchors and slightly fuller mid anchors move some of Test12's
-    // excess deep red back toward orange/yellow/green. The top four anchors are
-    // intentionally kept strong so cyan/violet/pink detail is not lost.
+    // Low bands stay warm but are a touch less uniformly orange. Bands 5-6
+    // are pushed closer to yellow, while the upper colors remain essentially
+    // Test13 except for a slightly less-cyan presence anchor and stronger pink.
     static constexpr std::array<std::array<float, 3>, 12> kColor{{
-        {{1.00f, 0.08f, 0.02f}}, // sub: red
-        {{1.00f, 0.22f, 0.02f}}, // deep bass: red-orange
-        {{1.00f, 0.40f, 0.02f}}, // bass: orange-red
-        {{1.00f, 0.58f, 0.03f}}, // upper bass: orange
-        {{1.00f, 0.72f, 0.04f}}, // low mid: amber
-        {{0.98f, 0.94f, 0.06f}}, // mids: yellow
-        {{0.60f, 1.00f, 0.10f}}, // upper mids: yellow-green
+        {{1.00f, 0.06f, 0.02f}}, // sub: red
+        {{1.00f, 0.19f, 0.02f}}, // deep bass: red-orange
+        {{1.00f, 0.36f, 0.02f}}, // bass: orange-red
+        {{1.00f, 0.55f, 0.03f}}, // upper bass: orange
+        {{1.00f, 0.75f, 0.04f}}, // low mid: amber-yellow
+        {{0.97f, 0.99f, 0.06f}}, // mids: yellow
+        {{0.63f, 1.00f, 0.10f}}, // upper mids: yellow-green
         {{0.12f, 0.94f, 0.58f}}, // vocal body: green-teal
-        {{0.04f, 0.78f, 1.00f}}, // presence: cyan
+        {{0.04f, 0.70f, 1.00f}}, // presence: slightly less cyan
         {{0.10f, 0.36f, 1.00f}}, // attack: blue
         {{0.62f, 0.10f, 1.00f}}, // highs: violet
-        {{1.00f, 0.06f, 0.88f}}  // air: pink/magenta
+        {{1.00f, 0.04f, 0.95f}}  // air: stronger pink/magenta
     }};
 
     float r = 0.0f, g = 0.0f, b = 0.0f;
@@ -68,14 +70,14 @@ rgb_color color_for_point(const waveform_point& p) {
         b += band[i] * kColor[i][2];
     }
 
-    // Back off the red-heavy Test12 balance and allow a little more green back
-    // into the blend while keeping the stronger blue/violet/pink contribution.
-    r *= 1.00f;
-    g *= 0.97f;
+    // Fine global balance only: preserve Test13's improved green/blue/purple,
+    // nudge red back up slightly, and keep enough blue for restored magenta.
+    r *= 1.01f;
+    g *= 0.98f;
     b *= 1.09f;
 
-    // Slightly softer separation than Test12 gives mixed sections a more
-    // Serato-like pastel/cohesive look without washing out spectral identity.
+    // Keep the softer Test13 blend; this is a palette balance refinement, not
+    // a return to the more separated/neon look of earlier tests.
     const float common = std::min({r, g, b});
     constexpr float kCommonRemoval = 0.24f;
     r = std::max(0.0f, r - common * kCommonRemoval);
