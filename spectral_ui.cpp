@@ -261,6 +261,7 @@ private:
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
         case WM_TIMER: {
+            apply_pending_click_start();
             update_reverse_visual_clock();
             update_scrub_motion_gate();
             update_transport_release_wait();
@@ -2145,6 +2146,33 @@ private:
         EndPaint(m_wnd, &ps);
     }
 
+    void apply_pending_click_start() {
+        if (!m_pendingClickStart) return;
+
+        auto pc = playback_control::get();
+        if (!pc->is_playing()) return;
+
+        metadb_handle_ptr nowPlaying;
+        if (!pc->get_now_playing(nowPlaying) || nowPlaying.is_empty()) return;
+        const bool samePendingTrack =
+            nowPlaying->get_subsong_index() == m_pendingClickTrackSubsong &&
+            m_pendingClickTrackPath == nowPlaying->get_path();
+        if (!samePendingTrack) return;
+
+        const double length = pc->playback_get_length_ex();
+        if (length <= 0.0 || !pc->playback_can_seek()) return;
+
+        const double target = std::clamp(m_pendingClickFraction, 0.0, 1.0);
+        m_pendingClickStart = false;
+        pc->playback_seek(target * length);
+
+        // Stopped click-to-play starts paused deliberately so no audio from 0:00
+        // leaks out before the seek is accepted. Resume only after the seek.
+        if (pc->is_paused()) pc->pause(false);
+        if (m_followPlayhead) recenter_on_playhead();
+        else invalidate_playhead();
+    }
+
     void seek_from_x(int x) {
         if (m_wnd == nullptr) return;
         RECT rc{};
@@ -2152,15 +2180,33 @@ private:
         const int width = rc.right - rc.left;
         if (width <= 1) return;
 
-        auto pc = playback_control::get();
-        if (!pc->is_playing() || !pc->playback_can_seek()) return;
-        const double length = pc->playback_get_length_ex();
-        if (length <= 0.0) return;
+        const double visible = std::clamp(
+            static_cast<double>(x) / static_cast<double>(width - 1), 0.0, 1.0);
+        const double trackFrac = std::clamp(
+            m_viewStart + visible * m_viewSpan, 0.0, 1.0);
 
-        const double visible = std::clamp(static_cast<double>(x) / static_cast<double>(width - 1), 0.0, 1.0);
-        const double trackFrac = std::clamp(m_viewStart + visible * m_viewSpan, 0.0, 1.0);
-        pc->playback_seek(trackFrac * length);
-        if (m_followPlayhead) recenter_on_playhead();
+        auto pc = playback_control::get();
+        if (pc->is_playing()) {
+            if (!pc->playback_can_seek()) return;
+            const double length = pc->playback_get_length_ex();
+            if (length <= 0.0) return;
+
+            pc->playback_seek(trackFrac * length);
+            if (pc->is_paused()) pc->pause(false);
+            if (m_followPlayhead) recenter_on_playhead();
+            else invalidate_playhead();
+            return;
+        }
+
+        // A single click on a stopped waveform means "play from here". Start
+        // playback paused, then the UI timer applies the seek as soon as foobar
+        // exposes the new playback length, and finally resumes.
+        if (m_currentTrack.is_empty()) return;
+        m_pendingClickFraction = trackFrac;
+        m_pendingClickTrackPath = m_currentTrack->get_path();
+        m_pendingClickTrackSubsong = m_currentTrack->get_subsong_index();
+        m_pendingClickStart = true;
+        pc->start(playback_control::track_command_play, true);
     }
 
     void stop_analysis() {
@@ -2273,9 +2319,9 @@ private:
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
 
-        // Test15: preserve the stopped view explicitly as well as comparing the
-        // current handle. This makes Stop -> Play on the same song robust even
-        // if foobar refreshes the now-playing handle between callbacks.
+        // Test16: the live on-screen view is authoritative. If the same track is
+        // restarted after Stop, preserve whatever zoom/pan/follow state exists
+        // *now*, including changes the user made while playback was stopped.
         bool sameCurrentTrack = false;
         if (!m_currentTrack.is_empty() && !track.is_empty()) {
             sameCurrentTrack =
@@ -2284,42 +2330,42 @@ private:
         }
 
         bool sameStoppedTrack = false;
-        if (m_stoppedViewValid && !track.is_empty()) {
+        if (m_stoppedTrackValid && !track.is_empty()) {
             sameStoppedTrack =
                 m_stoppedTrackSubsong == track->get_subsong_index() &&
                 m_stoppedTrackPath == track->get_path();
         }
 
+        // If click-to-play somehow starts a different track, do not leave that
+        // unrelated track paused waiting for a pending seek that can never match.
+        if (m_pendingClickStart && !track.is_empty()) {
+            const bool pendingMatches =
+                m_pendingClickTrackSubsong == track->get_subsong_index() &&
+                m_pendingClickTrackPath == track->get_path();
+            if (!pendingMatches) {
+                m_pendingClickStart = false;
+                auto pc = playback_control::get();
+                if (pc->is_playing() && pc->is_paused()) pc->pause(false);
+            }
+        }
+
         const bool preserveView = sameCurrentTrack || sameStoppedTrack;
         start_analysis(track, !preserveView);
 
-        if (sameStoppedTrack) {
-            m_viewStart = m_stoppedViewStart;
-            m_viewSpan = m_stoppedViewSpan;
-            m_followPlayhead = m_stoppedFollowPlayhead;
-            m_followMode = m_stoppedFollowMode;
-            clamp_view();
-            invalidate_all();
-        }
-
-        // A different song consumes the saved stopped view so it can never leak
-        // into later tracks. Replaying the same song keeps it available for the
-        // next Stop -> Play cycle until on_playback_stop refreshes the snapshot.
-        if (!sameStoppedTrack) m_stoppedViewValid = false;
+        // A genuinely different song resets normally and consumes the stopped
+        // identity. Same-song restarts keep the current live view untouched.
+        if (!sameStoppedTrack) m_stoppedTrackValid = false;
     }
     void on_playback_stop(play_control::t_stop_reason) override {
-        // Snapshot the user's exact view before any stop-side cleanup. This is
-        // intentionally in-memory only: it survives Stop -> Play, not app exit.
+        // Remember only which track was stopped. Do NOT snapshot zoom/pan here:
+        // the user may continue changing the view while stopped, and that latest
+        // visible state is what the next Play must preserve.
         if (!m_currentTrack.is_empty()) {
             m_stoppedTrackPath = m_currentTrack->get_path();
             m_stoppedTrackSubsong = m_currentTrack->get_subsong_index();
-            m_stoppedViewStart = m_viewStart;
-            m_stoppedViewSpan = m_viewSpan;
-            m_stoppedFollowPlayhead = m_followPlayhead;
-            m_stoppedFollowMode = m_followMode;
-            m_stoppedViewValid = true;
+            m_stoppedTrackValid = true;
         } else {
-            m_stoppedViewValid = false;
+            m_stoppedTrackValid = false;
         }
 
         auto transport = find_transport_service();
@@ -2439,14 +2485,18 @@ private:
     std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
     metadb_handle_ptr m_currentTrack;
 
-    // Explicit Stop -> Play view snapshot for the same track.
-    bool m_stoppedViewValid = false;
+    // Track identity retained across Stop so restarting the same song preserves
+    // the current live view without restoring an obsolete stop-time zoom value.
+    bool m_stoppedTrackValid = false;
     std::string m_stoppedTrackPath;
     t_uint32 m_stoppedTrackSubsong = 0;
-    double m_stoppedViewStart = 0.0;
-    double m_stoppedViewSpan = 1.0;
-    bool m_stoppedFollowPlayhead = false;
-    follow_mode m_stoppedFollowMode = follow_mode::centered;
+
+    // Single-click on a stopped waveform: start paused, seek when playback is
+    // actually ready, then resume from the clicked timeline position.
+    bool m_pendingClickStart = false;
+    double m_pendingClickFraction = 0.0;
+    std::string m_pendingClickTrackPath;
+    t_uint32 m_pendingClickTrackSubsong = 0;
 
     std::thread m_worker;
     std::shared_ptr<abort_callback_impl> m_abort;
