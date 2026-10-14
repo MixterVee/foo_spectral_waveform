@@ -7,8 +7,15 @@ namespace spectral_waveform {
 struct waveform_point {
     std::uint16_t peak = 0;
     std::uint16_t rms = 0;
+
+    // Six-band spectral colour data. Existing names are retained for the
+    // central three regions so the rest of the UI can evolve incrementally.
+    // 20-90 Hz, 90-250 Hz, 250-700 Hz, 700-2000 Hz, 2-6 kHz, 6-20 kHz.
+    std::uint8_t sub_bass = 0;
     std::uint8_t bass = 0;
+    std::uint8_t low_mid = 0;
     std::uint8_t mids = 0;
+    std::uint8_t high_mid = 0;
     std::uint8_t treble = 0;
 };
 
