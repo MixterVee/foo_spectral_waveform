@@ -1647,21 +1647,27 @@ private:
         begin = std::min(begin, count - 1);
         end = std::max(begin + 1, std::min(end, count));
 
-        uint64_t rms = 0, bass = 0, mids = 0, treble = 0;
+        uint64_t rms = 0, subBass = 0, bass = 0, lowMid = 0, mids = 0, highMid = 0, treble = 0;
         uint16_t peak = 0;
         for (size_t i = begin; i < end; ++i) {
             const auto& p = data.points[i];
             peak = std::max(peak, p.peak);
             rms += p.rms;
+            subBass += p.sub_bass;
             bass += p.bass;
+            lowMid += p.low_mid;
             mids += p.mids;
+            highMid += p.high_mid;
             treble += p.treble;
         }
         const uint64_t n = static_cast<uint64_t>(end - begin);
         out.peak = peak;
         out.rms = static_cast<uint16_t>(rms / n);
+        out.sub_bass = static_cast<uint8_t>(subBass / n);
         out.bass = static_cast<uint8_t>(bass / n);
+        out.low_mid = static_cast<uint8_t>(lowMid / n);
         out.mids = static_cast<uint8_t>(mids / n);
+        out.high_mid = static_cast<uint8_t>(highMid / n);
         out.treble = static_cast<uint8_t>(treble / n);
         return out;
     }
