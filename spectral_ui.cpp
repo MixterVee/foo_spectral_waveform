@@ -1043,7 +1043,8 @@ private:
         if (!pc->is_playing()) {
             if (!m_stoppedPositionValid) return -1;
             positionFrac = std::clamp(m_stoppedPositionFraction, 0.0, 1.0);
-        } else if (pc->is_paused() && m_nativePauseFreeze) {
+        } else if (m_nativePauseFreeze &&
+            (pc->is_paused() || m_nativeResumeSeek)) {
             positionFrac = std::clamp(m_nativePauseFraction, 0.0, 1.0);
         } else if (!playback_fraction(positionFrac)) {
             return -1;
@@ -2489,6 +2490,7 @@ private:
         // aligned with the frozen visual cursor. Never recenter for that seek.
         if (m_nativeResumeSeek) {
             m_nativeResumeSeek = false;
+            m_nativePauseFreeze = false;
             invalidate_playhead();
             return;
         }
@@ -2531,15 +2533,19 @@ private:
         } else if (m_nativePauseFreeze) {
             // Foobar owns Play/Pause. Our only transport correction is aligning
             // resume to the same frozen position the user saw while paused.
+            bool seekIssued = false;
             if (pc->playback_can_seek()) {
                 const double length = pc->playback_get_length_ex();
                 if (length > 0.0) {
                     m_nativeResumeSeek = true;
+                    seekIssued = true;
                     pc->playback_seek(
                         std::clamp(m_nativePauseFraction, 0.0, 1.0) * length);
                 }
             }
-            m_nativePauseFreeze = false;
+            // If no seek is possible, simply hand the cursor back to foobar.
+            // Otherwise keep it frozen until on_playback_seek confirms alignment.
+            if (!seekIssued) m_nativePauseFreeze = false;
         }
 
         invalidate_frame();
