@@ -1,7 +1,7 @@
 name: Build Native foo_spectral_waveform
 
-# Temporary work branch: keep push builds disabled until the fixes are ready to test.
 on:
+  push:
   workflow_dispatch:
 
 jobs:
