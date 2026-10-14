@@ -294,6 +294,12 @@ private:
             return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_KEYDOWN:
             switch (wp) {
+            case VK_RETURN: {
+                const bool repeat = (lp & (static_cast<LPARAM>(1) << 30)) != 0;
+                if (repeat) return 0;
+                playback_control::get()->play_or_pause();
+                return 0;
+            }
             case VK_SPACE: {
                 const bool repeat = (lp & (static_cast<LPARAM>(1) << 30)) != 0;
                 if (repeat) return 0;
@@ -2212,9 +2218,9 @@ private:
         if (pc->is_playing()) return;
 
         // Cursor travel is defined by the current visible window, not a fixed
-        // number of seconds. This makes the arrows naturally become more precise
-        // as the waveform is zoomed in.
-        const double visibleStep = m_viewSpan * (fine ? 0.001 : 0.01);
+        // number of seconds. Regular arrows use the previous fine resolution;
+        // Ctrl+Arrow is four times finer for precise cue/loop positioning.
+        const double visibleStep = m_viewSpan * (fine ? 0.00025 : 0.001);
 
         double position = m_stoppedPositionValid
             ? m_stoppedPositionFraction
