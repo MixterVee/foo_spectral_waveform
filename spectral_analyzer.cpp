@@ -136,37 +136,39 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
         mean[i] = bins[i] > 0 ? energy[i] / static_cast<double>(bins[i]) : 0.0;
     }
 
-    // Partial pink-spectrum compensation. Music naturally slopes downward with
-    // frequency; this restores upper-band colour detail without making the
-    // waveform unnaturally cool.
+    // Work in dB so the natural downward spectral slope can be corrected in
+    // perceptually meaningful units. The previous power-domain tilt was only
+    // about 2 dB/octave, which left low bands dominating nearly every frame.
     static constexpr std::array<double, 12> center_hz{
         30.0, 56.1, 87.7, 140.7, 232.4, 387.3,
         651.9, 1090.9, 1870.8, 3354.1, 6000.0, 12649.1
     };
     constexpr double kTiltReferenceHz = 250.0;
-    constexpr double kTiltExponent = 0.68;
+    constexpr double kTiltDbPerOctave = 4.25;
+    constexpr double kSoftmaxTemperatureDb = 7.5;
 
-    std::array<double, 12> tilted{};
-    double tilted_total = 1.0e-30;
-    for (std::size_t i = 0; i < tilted.size(); ++i) {
-        const double tilt = std::pow(center_hz[i] / kTiltReferenceHz, kTiltExponent);
-        tilted[i] = mean[i] * tilt;
-        tilted_total += tilted[i];
+    std::array<double, 12> corrected_db{};
+    double max_db = -300.0;
+    for (std::size_t i = 0; i < corrected_db.size(); ++i) {
+        const double db = 10.0 * std::log10(std::max(mean[i], 1.0e-30));
+        const double octaves = std::log2(center_hz[i] / kTiltReferenceHz);
+        corrected_db[i] = db + kTiltDbPerOctave * octaves;
+        max_db = std::max(max_db, corrected_db[i]);
     }
 
-    // Gentle compression helps transient upper bands remain visible while
-    // retaining the warm bass/low-mid foundation of the source material.
+    // Convert corrected dB values to soft relative weights. This keeps the
+    // strongest regions prominent but still allows bands within roughly one
+    // musical dynamic step to contribute meaningful colour.
     static constexpr std::array<double, 12> gain{
-        1.08, 1.06, 1.04, 1.02, 1.00, 0.99,
-        0.99, 1.00, 1.02, 1.05, 1.09, 1.14
+        1.05, 1.04, 1.03, 1.02, 1.00, 1.00,
+        1.01, 1.02, 1.04, 1.06, 1.09, 1.12
     };
-    constexpr double kShareCurve = 0.82;
 
     std::array<double, 12> weight{};
     double weight_total = 1.0e-30;
     for (std::size_t i = 0; i < weight.size(); ++i) {
-        const double share = std::clamp(tilted[i] / tilted_total, 0.0, 1.0);
-        weight[i] = gain[i] * std::pow(share, kShareCurve);
+        const double delta = corrected_db[i] - max_db;
+        weight[i] = gain[i] * std::exp(delta / kSoftmaxTemperatureDb);
         weight_total += weight[i];
     }
 
