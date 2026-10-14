@@ -292,12 +292,16 @@ private:
             return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_KEYDOWN:
             switch (wp) {
-            case VK_SPACE:
+            case VK_SPACE: {
+                const bool repeat = (lp & (static_cast<LPARAM>(1) << 30)) != 0;
+                if (repeat) return 0;
                 if (m_viewSpan < 0.9995) {
-                    m_followPlayhead = true;
-                    recenter_on_playhead();
+                    m_followPlayhead = !m_followPlayhead;
+                    if (m_followPlayhead) recenter_on_playhead();
+                    else invalidate_frame();
                 }
                 return 0;
+            }
             case 'H':
                 toggle_touch_hold();
                 return 0;
@@ -1200,9 +1204,10 @@ private:
         AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuZoomOut, L"Zoom Out\tDown Arrow");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuFitTrack, L"Fit Entire Track");
-        AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuCenterPlayhead, L"Center on Playhead\tSpace");
+        AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0),
+            kMenuCenterPlayhead, L"Center on Playhead");
         AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0) |
-            (m_followPlayhead ? MF_CHECKED : 0), kMenuFollowPlayhead, L"Follow Playhead");
+            (m_followPlayhead ? MF_CHECKED : 0), kMenuFollowPlayhead, L"Follow Playhead\tSpace");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (m_followMode == follow_mode::centered ? MF_CHECKED : 0),
             kMenuFollowCentered, L"Follow Mode: Centered Scroll");
