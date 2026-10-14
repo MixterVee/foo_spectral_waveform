@@ -97,11 +97,10 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
 
     fft(real, imag);
 
-    // Six frequency regions give the palette enough information to distinguish
-    // sub/bass, low mids, vocals, presence and air instead of trying to derive a
-    // full DJ palette from only three values.
-    std::array<double, 6> energy{};
-    std::array<std::uint32_t, 6> bins{};
+    // Twelve musical frequency regions. The FFT itself is unchanged; we simply
+    // preserve much more of its spectral detail for colour rendering.
+    std::array<double, 12> energy{};
+    std::array<std::uint32_t, 12> bins{};
 
     for (std::size_t bin = 1; bin < m_window_size / 2; ++bin) {
         const double freq = (static_cast<double>(bin) * m_sample_rate) /
@@ -113,38 +112,41 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
         const double power = re * re + im * im;
 
         std::size_t band = 0;
-        if (freq < 90.0) band = 0;
-        else if (freq < 250.0) band = 1;
-        else if (freq < 700.0) band = 2;
-        else if (freq < 2000.0) band = 3;
-        else if (freq < 6000.0) band = 4;
-        else band = 5;
+        if (freq < 45.0) band = 0;
+        else if (freq < 70.0) band = 1;
+        else if (freq < 110.0) band = 2;
+        else if (freq < 180.0) band = 3;
+        else if (freq < 300.0) band = 4;
+        else if (freq < 500.0) band = 5;
+        else if (freq < 850.0) band = 6;
+        else if (freq < 1400.0) band = 7;
+        else if (freq < 2500.0) band = 8;
+        else if (freq < 4500.0) band = 9;
+        else if (freq < 8000.0) band = 10;
+        else band = 11;
 
         energy[band] += power;
         ++bins[band];
     }
 
-    // Compare mean power per FFT bin, not raw band sums. Otherwise the very
-    // wide upper bands win merely because they contain more FFT bins. Gentle
-    // perceptual compensation and compression then keeps quieter presence/air
-    // information visible in mastered full-range material.
-    std::array<double, 6> mean{};
+    // Use mean power per FFT bin so wider high-frequency bands do not win just
+    // because they contain more bins.
+    std::array<double, 12> mean{};
     for (std::size_t i = 0; i < mean.size(); ++i) {
         mean[i] = bins[i] > 0 ? energy[i] / static_cast<double>(bins[i]) : 0.0;
     }
 
-    // Music spectra naturally fall with frequency, so raw mean power still
-    // makes the lowest bands dominate almost every frame. Apply a partial
-    // pink-spectrum compensation before normalising. The exponent is kept
-    // below 1.0 so the waveform remains warm overall rather than turning into
-    // a uniformly cool rainbow.
-    static constexpr std::array<double, 6> center_hz{
-        42.426, 150.0, 418.33, 1183.22, 3464.10, 10954.45
+    // Partial pink-spectrum compensation. Music naturally slopes downward with
+    // frequency; this restores upper-band colour detail without making the
+    // waveform unnaturally cool.
+    static constexpr std::array<double, 12> center_hz{
+        30.0, 56.1, 87.7, 140.7, 232.4, 387.3,
+        651.9, 1090.9, 1870.8, 3354.1, 6000.0, 12649.1
     };
     constexpr double kTiltReferenceHz = 250.0;
-    constexpr double kTiltExponent = 0.78;
+    constexpr double kTiltExponent = 0.68;
 
-    std::array<double, 6> tilted{};
+    std::array<double, 12> tilted{};
     double tilted_total = 1.0e-30;
     for (std::size_t i = 0; i < tilted.size(); ++i) {
         const double tilt = std::pow(center_hz[i] / kTiltReferenceHz, kTiltExponent);
@@ -152,14 +154,15 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
         tilted_total += tilted[i];
     }
 
-    // Mild dynamic compression lets short presence/air transients influence
-    // colour without overpowering the bass and low-mid foundation.
-    static constexpr std::array<double, 6> gain{
-        1.06, 1.04, 1.00, 1.00, 1.04, 1.10
+    // Gentle compression helps transient upper bands remain visible while
+    // retaining the warm bass/low-mid foundation of the source material.
+    static constexpr std::array<double, 12> gain{
+        1.08, 1.06, 1.04, 1.02, 1.00, 0.99,
+        0.99, 1.00, 1.02, 1.05, 1.09, 1.14
     };
-    constexpr double kShareCurve = 0.80;
+    constexpr double kShareCurve = 0.82;
 
-    std::array<double, 6> weight{};
+    std::array<double, 12> weight{};
     double weight_total = 1.0e-30;
     for (std::size_t i = 0; i < weight.size(); ++i) {
         const double share = std::clamp(tilted[i] / tilted_total, 0.0, 1.0);
@@ -177,12 +180,18 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
     waveform_point p;
     p.peak = static_cast<std::uint16_t>(std::lround(std::min(1.0f, peak) * 65535.0f));
     p.rms = static_cast<std::uint16_t>(std::lround(std::min(1.0, rms) * 65535.0));
-    p.sub_bass = encode_share(weight[0]);
-    p.bass = encode_share(weight[1]);
-    p.low_mid = encode_share(weight[2]);
-    p.mids = encode_share(weight[3]);
-    p.high_mid = encode_share(weight[4]);
-    p.treble = encode_share(weight[5]);
+    p.sub = encode_share(weight[0]);
+    p.deep_bass = encode_share(weight[1]);
+    p.bass = encode_share(weight[2]);
+    p.upper_bass = encode_share(weight[3]);
+    p.low_mid = encode_share(weight[4]);
+    p.mids = encode_share(weight[5]);
+    p.upper_mid = encode_share(weight[6]);
+    p.vocal_body = encode_share(weight[7]);
+    p.presence = encode_share(weight[8]);
+    p.attack = encode_share(weight[9]);
+    p.highs = encode_share(weight[10]);
+    p.air = encode_share(weight[11]);
     m_points.push_back(p);
 }
 
