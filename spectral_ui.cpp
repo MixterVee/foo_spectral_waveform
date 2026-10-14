@@ -175,9 +175,7 @@ enum class follow_mode {
     paged,
 };
 
-class spectral_waveform_instance : public ui_element_instance,
-    private play_callback_impl_base,
-    private message_filter_impl_base {
+class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
 public:
     spectral_waveform_instance(HWND parent, ui_element_config::ptr, ui_element_instance_callback::ptr callback)
         : play_callback_impl_base(
@@ -258,76 +256,10 @@ private:
         return DefWindowProcW(wnd, msg, wp, lp);
     }
 
-    bool pretranslate_message(MSG* msg) override {
-        if (msg == nullptr || msg->message != WM_KEYDOWN || msg->wParam != VK_RETURN)
-            return false;
-
-        // Leave Enter alone while the user is typing in an edit control.
-        if (keyboard_shortcut_manager::is_typing_message(msg)) return false;
-
-        // No modified Enter combinations; those remain available to foobar.
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
-            (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
-            (GetKeyState(VK_MENU) & 0x8000) != 0) {
-            return false;
-        }
-
-        const bool repeat = (msg->lParam & (static_cast<LPARAM>(1) << 30)) != 0;
-        if (!repeat) handle_transport_enter();
-        return true;
-    }
-
-    void handle_transport_enter() {
-        auto pc = playback_control::get();
-
-        if (pc->is_playing()) {
-            if (!pc->is_paused()) {
-                // Freeze the exact visible transport position before pausing.
-                // This prevents the paused playback clock from visually
-                // correcting backward by a small amount.
-                double positionFrac = 0.0;
-                if (playback_fraction(positionFrac)) {
-                    m_enterPauseFraction =
-                        std::clamp(positionFrac, 0.0, 1.0);
-                    m_enterPauseFreeze = true;
-                    m_lastPlaybackFraction = m_enterPauseFraction;
-                    m_lastPlaybackFractionValid = true;
-                }
-                pc->pause(true);
-                invalidate_playhead();
-            } else {
-                // Resume from exactly the frozen cursor position. Seeking while
-                // paused makes audio and the visible playhead agree before output
-                // starts moving again.
-                if (m_enterPauseFreeze && pc->playback_can_seek()) {
-                    const double length = pc->playback_get_length_ex();
-                    if (length > 0.0) {
-                        m_enterResumeSeek = true;
-                        pc->playback_seek(
-                            std::clamp(m_enterPauseFraction, 0.0, 1.0) * length);
-                        m_enterResumeSeek = false;
-                    }
-                }
-                pc->pause(false);
-                m_enterPauseFreeze = false;
-                invalidate_playhead();
-            }
-            return;
-        }
-
-        // Stopped: normal Play. The existing same-track Stop -> Play path restores
-        // the stored cursor position without recentering the view.
-        m_enterPauseFreeze = false;
-        pc->start(playback_control::track_command_play, false);
-    }
-
     LRESULT handle_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
-        case WM_CHAR:
-            if (wp == VK_RETURN) return 0;
-            break;
         case WM_TIMER: {
             remember_live_playback_position();
             apply_pending_restart_seek();
@@ -359,14 +291,9 @@ private:
             show_context_menu(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_GETDLGCODE:
-            return DLGC_WANTALLKEYS | DLGC_WANTARROWS | DLGC_WANTCHARS;
+            return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_KEYDOWN:
             switch (wp) {
-            case VK_RETURN: {
-                const bool repeat = (lp & (static_cast<LPARAM>(1) << 30)) != 0;
-                if (!repeat) handle_transport_enter();
-                return 0;
-            }
             case VK_SPACE: {
                 const bool repeat = (lp & (static_cast<LPARAM>(1) << 30)) != 0;
                 if (repeat) return 0;
@@ -1116,8 +1043,8 @@ private:
         if (!pc->is_playing()) {
             if (!m_stoppedPositionValid) return -1;
             positionFrac = std::clamp(m_stoppedPositionFraction, 0.0, 1.0);
-        } else if (pc->is_paused() && m_enterPauseFreeze) {
-            positionFrac = std::clamp(m_enterPauseFraction, 0.0, 1.0);
+        } else if (pc->is_paused() && m_nativePauseFreeze) {
+            positionFrac = std::clamp(m_nativePauseFraction, 0.0, 1.0);
         } else if (!playback_fraction(positionFrac)) {
             return -1;
         }
@@ -2241,7 +2168,7 @@ private:
 
     void remember_live_playback_position() {
         auto pc = playback_control::get();
-        if (!pc->is_playing()) return;
+        if (!pc->is_playing() || pc->is_paused()) return;
 
         double positionFrac = 0.0;
         if (!playback_fraction(positionFrac)) return;
@@ -2462,8 +2389,8 @@ private:
         m_reverseReleaseVisualLastTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
-        m_enterPauseFreeze = false;
-        m_enterResumeSeek = false;
+        m_nativePauseFreeze = false;
+        m_nativeResumeSeek = false;
 
         // Test16: the live on-screen view is authoritative. If the same track is
         // restarted after Stop, preserve whatever zoom/pan/follow state exists
@@ -2550,17 +2477,18 @@ private:
         m_reverseReleaseVisualLastTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
-        m_enterPauseFreeze = false;
-        m_enterResumeSeek = false;
+        m_nativePauseFreeze = false;
+        m_nativeResumeSeek = false;
         stop_analysis();
         invalidate_all(false);
     }
     void on_playback_seek(double) override {
         remember_live_playback_position();
 
-        // Enter resume performs an exact paused seek solely to align transport
-        // with the frozen cursor. It must not recenter or move the view.
-        if (m_enterResumeSeek) {
+        // Native Play/Pause resume may perform one exact seek to keep transport
+        // aligned with the frozen visual cursor. Never recenter for that seek.
+        if (m_nativeResumeSeek) {
+            m_nativeResumeSeek = false;
             invalidate_playhead();
             return;
         }
@@ -2582,7 +2510,38 @@ private:
             m_touchHoldLatched = false;
             m_touchPauseOwned = false;
         }
-        if (!paused && !m_enterResumeSeek) m_enterPauseFreeze = false;
+
+        auto pc = playback_control::get();
+        if (paused) {
+            // Freeze exactly where the waveform was visibly moving immediately
+            // before foobar paused. This avoids the small backward correction
+            // that can occur when the paused decoder clock settles.
+            if (m_lastPlaybackFractionValid) {
+                m_nativePauseFraction =
+                    std::clamp(m_lastPlaybackFraction, 0.0, 1.0);
+                m_nativePauseFreeze = true;
+            } else {
+                double positionFrac = 0.0;
+                if (playback_fraction(positionFrac)) {
+                    m_nativePauseFraction =
+                        std::clamp(positionFrac, 0.0, 1.0);
+                    m_nativePauseFreeze = true;
+                }
+            }
+        } else if (m_nativePauseFreeze) {
+            // Foobar owns Play/Pause. Our only transport correction is aligning
+            // resume to the same frozen position the user saw while paused.
+            if (pc->playback_can_seek()) {
+                const double length = pc->playback_get_length_ex();
+                if (length > 0.0) {
+                    m_nativeResumeSeek = true;
+                    pc->playback_seek(
+                        std::clamp(m_nativePauseFraction, 0.0, 1.0) * length);
+                }
+            }
+            m_nativePauseFreeze = false;
+        }
+
         invalidate_frame();
     }
     void on_playback_time(double) override {
@@ -2679,11 +2638,11 @@ private:
 
     // External Play after Stop reopens the track at 0:00; seek back to the stored
     // stopped position as soon as the playback instance is seekable.
-    // Enter transport pause uses a frozen visual/audio cursor so pause/resume
-    // feels immediate and does not take a small corrective step backward.
-    bool m_enterPauseFreeze = false;
-    bool m_enterResumeSeek = false;
-    double m_enterPauseFraction = 0.0;
+    // Foobar owns Play/Pause. These only keep the waveform's visible cursor
+    // solid across native pause/resume events.
+    bool m_nativePauseFreeze = false;
+    bool m_nativeResumeSeek = false;
+    double m_nativePauseFraction = 0.0;
 
     bool m_pendingRestartSeek = false;
     double m_pendingRestartFraction = 0.0;
