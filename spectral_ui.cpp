@@ -268,8 +268,7 @@ private:
         // transport shortcut to be skipped until the waveform itself had focus.
         wchar_t className[64]{};
         if (msg->hwnd != nullptr &&
-            GetClassNameW(msg->hwnd, className,
-                static_cast<int>(std::size(className))) > 0) {
+            GetClassNameW(msg->hwnd, className, _countof(className)) > 0) {
             const bool editControl =
                 _wcsicmp(className, L"Edit") == 0 ||
                 _wcsnicmp(className, L"RichEdit", 8) == 0 ||
