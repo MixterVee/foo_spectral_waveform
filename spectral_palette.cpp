@@ -27,15 +27,14 @@ rgb_color color_for_point(const waveform_point& p) {
         p.air / 255.0f
     };
 
-    // Test9: the dB-normalized analyzer in test8 finally gives us useful
-    // twelve-band data. Do not collapse it back to only a few dominant bands;
-    // blend all regions, but emphasize stronger bands enough to retain clear
-    // spectral identity. This produces broader, more cohesive colour regions
-    // instead of the neon-striped look of test8.
+    // Test12: keep the warm Serato-style foundation from test11, but let the
+    // upper spectral regions assert themselves more clearly. Low-band display
+    // gains are eased slightly while presence/attack/highs/air are lifted.
+    // The analyzer and cached twelve-band data are intentionally unchanged.
     static constexpr std::array<float, 12> kDisplayGain{
-        1.00f, 1.02f, 1.04f, 1.03f,
-        0.98f, 0.94f, 0.94f, 0.97f,
-        1.03f, 1.08f, 1.15f, 1.18f
+        0.92f, 0.94f, 0.95f, 0.95f,
+        0.96f, 0.91f, 0.94f, 0.99f,
+        1.18f, 1.24f, 1.38f, 1.48f
     };
 
     float total = 0.0001f;
@@ -45,22 +44,23 @@ rgb_color color_for_point(const waveform_point& p) {
     }
     for (auto& v : band) v /= total;
 
-    // Warm-low to cool-high anchors. Compared with test8, the high-frequency
-    // anchors are slightly less extreme and all twelve bands participate in the
-    // blend, giving Serato-like patches rather than one-column hue jumps.
+    // Warm-low to cool-high anchors. Test12 trims some yellow bias in the
+    // low-mid/mid transition and gives the top four bands cleaner cyan, blue,
+    // violet and pink identities. The intent is colored Serato-like streaks,
+    // not a rainbow reset.
     static constexpr std::array<std::array<float, 3>, 12> kColor{{
         {{1.00f, 0.05f, 0.02f}}, // sub: red
         {{1.00f, 0.15f, 0.02f}}, // deep bass
         {{1.00f, 0.30f, 0.02f}}, // bass
         {{1.00f, 0.48f, 0.02f}}, // upper bass
-        {{1.00f, 0.68f, 0.03f}}, // low mid: warmer amber
-        {{1.00f, 0.92f, 0.04f}}, // mids: yellow, less green
-        {{0.58f, 1.00f, 0.08f}}, // upper mids: yellow-green
-        {{0.12f, 0.92f, 0.50f}}, // vocal body: green-teal
-        {{0.05f, 0.76f, 1.00f}}, // presence: cyan
-        {{0.10f, 0.40f, 1.00f}}, // attack: blue
-        {{0.54f, 0.13f, 1.00f}}, // highs: slightly richer violet
-        {{0.98f, 0.08f, 0.80f}}  // air: slightly richer pink/magenta
+        {{1.00f, 0.61f, 0.03f}}, // low mid: amber, less yellow
+        {{0.98f, 0.87f, 0.05f}}, // mids: warm yellow-green
+        {{0.52f, 1.00f, 0.10f}}, // upper mids: green
+        {{0.10f, 0.93f, 0.55f}}, // vocal body: green-teal
+        {{0.04f, 0.78f, 1.00f}}, // presence: cyan
+        {{0.10f, 0.36f, 1.00f}}, // attack: blue
+        {{0.62f, 0.10f, 1.00f}}, // highs: violet
+        {{1.00f, 0.06f, 0.88f}}  // air: pink/magenta
     }};
 
     float r = 0.0f, g = 0.0f, b = 0.0f;
@@ -70,18 +70,17 @@ rgb_color color_for_point(const waveform_point& p) {
         b += band[i] * kColor[i][2];
     }
 
-    // Test9 still leaned too yellow/green. Apply a small split balance rather
-    // than increasing saturation: a little more warm red and cool blue, with a
-    // slight green reduction, keeps the image cohesive while restoring the
-    // Serato-like orange and blue/purple presence.
-    r *= 1.05f;
-    g *= 0.94f;
-    b *= 1.04f;
+    // Small renderer-only split balance: preserve the warm body, reduce the
+    // tendency toward yellow/orange averaging, and make meaningful upper-band
+    // energy survive as cyan/violet/pink in the final color.
+    r *= 1.03f;
+    g *= 0.92f;
+    b *= 1.10f;
 
-    // Moderate saturation: stronger than a plain RGB average, but much softer
-    // than test8 so neighboring time slices visually belong together.
+    // Slightly more separation than test11, still deliberately cohesive so
+    // adjacent slices read as musical regions rather than neon stripes.
     const float common = std::min({r, g, b});
-    constexpr float kCommonRemoval = 0.24f;
+    constexpr float kCommonRemoval = 0.26f;
     r = std::max(0.0f, r - common * kCommonRemoval);
     g = std::max(0.0f, g - common * kCommonRemoval);
     b = std::max(0.0f, b - common * kCommonRemoval);
