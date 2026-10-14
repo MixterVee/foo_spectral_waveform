@@ -325,11 +325,19 @@ private:
                 zoom_from_keyboard(false);
                 return 0;
             case VK_LEFT:
-                pan_from_keyboard(-1);
+            case VK_RIGHT: {
+                auto pc = playback_control::get();
+                if (!pc->is_playing()) {
+                    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                    const double stepSeconds = ctrl ? 0.1 : (shift ? 5.0 : 1.0);
+                    nudge_stopped_playhead(
+                        wp == VK_LEFT ? -stepSeconds : stepSeconds);
+                } else {
+                    pan_from_keyboard(wp == VK_LEFT ? -1 : 1);
+                }
                 return 0;
-            case VK_RIGHT:
-                pan_from_keyboard(1);
-                return 0;
+            }
             }
             break;
         case WM_KEYUP:
@@ -887,6 +895,7 @@ private:
 
     void recenter_on_playhead() {
         m_releaseGlideActive = false;
+        m_resumeVisualAnchorActive = false;
         center_on_playhead_once();
     }
 
@@ -970,7 +979,10 @@ private:
         const double oldStart = m_viewStart;
 
         if (m_followMode == follow_mode::centered) {
-            m_viewStart = positionFrac - m_viewSpan * 0.5;
+            const double anchor = m_resumeVisualAnchorActive
+                ? std::clamp(m_resumeVisualAnchor, 0.0, 1.0)
+                : 0.5;
+            m_viewStart = positionFrac - m_viewSpan * anchor;
             clamp_view();
         } else {
             const double pageEnd = view_end();
@@ -1144,6 +1156,7 @@ private:
 
     void pan_from_keyboard(int direction) {
         if (direction == 0 || m_viewSpan >= 0.9995) return;
+        m_resumeVisualAnchorActive = false;
         m_followPlayhead = false;
         m_viewStart += static_cast<double>(direction) * m_viewSpan * kKeyboardPanFraction;
         clamp_view();
@@ -2187,8 +2200,41 @@ private:
 
         m_lastPlaybackFraction = target;
         m_lastPlaybackFractionValid = true;
-        if (m_followPlayhead) recenter_on_playhead();
-        else invalidate_playhead();
+
+        // Resume from the existing stopped visual position. Centered follow, if
+        // enabled, uses m_resumeVisualAnchor instead of snapping to 50%.
+        invalidate_playhead();
+    }
+
+    void nudge_stopped_playhead(double deltaSeconds) {
+        if (deltaSeconds == 0.0) return;
+
+        auto pc = playback_control::get();
+        if (pc->is_playing()) return;
+
+        auto waveform = waveform_snapshot();
+        if (!waveform || waveform->duration_seconds <= 0.0) return;
+
+        double position = m_stoppedPositionValid
+            ? m_stoppedPositionFraction
+            : (m_lastPlaybackFractionValid ? m_lastPlaybackFraction : 0.0);
+        position = std::clamp(
+            position + deltaSeconds / waveform->duration_seconds, 0.0, 1.0);
+
+        m_stoppedPositionFraction = position;
+        m_stoppedPositionValid = true;
+        m_lastPlaybackFraction = position;
+        m_lastPlaybackFractionValid = true;
+
+        // Keep keyboard positioning visible without needlessly recentering.
+        if (m_viewSpan < 0.9995 &&
+            (position < m_viewStart || position > view_end())) {
+            m_viewStart = std::clamp(
+                position - m_viewSpan * 0.5, 0.0, 1.0 - m_viewSpan);
+            invalidate_all();
+        } else {
+            invalidate_playhead();
+        }
     }
 
     void seek_from_x(int x) {
@@ -2226,6 +2272,7 @@ private:
         m_stoppedPositionValid = true;
         m_lastPlaybackFraction = trackFrac;
         m_lastPlaybackFractionValid = true;
+        m_resumeVisualAnchorActive = false;
         invalidate_playhead();
     }
 
@@ -2365,8 +2412,20 @@ private:
             m_pendingRestartFraction = m_stoppedPositionFraction;
             m_pendingRestartTrackPath = track->get_path();
             m_pendingRestartTrackSubsong = track->get_subsong_index();
+
+            if (m_viewSpan < 0.9995 &&
+                m_stoppedPositionFraction >= m_viewStart &&
+                m_stoppedPositionFraction <= view_end()) {
+                m_resumeVisualAnchor = std::clamp(
+                    (m_stoppedPositionFraction - m_viewStart) / m_viewSpan,
+                    0.0, 1.0);
+                m_resumeVisualAnchorActive = true;
+            } else {
+                m_resumeVisualAnchorActive = false;
+            }
         } else {
             m_pendingRestartSeek = false;
+            m_resumeVisualAnchorActive = false;
         }
 
         start_analysis(track, !preserveView);
@@ -2535,6 +2594,11 @@ private:
     double m_pendingRestartFraction = 0.0;
     std::string m_pendingRestartTrackPath;
     t_uint32 m_pendingRestartTrackSubsong = 0;
+
+    // Same-track Stop -> Play keeps the cursor at its existing visual X rather
+    // than forcing centered follow to jump it to 50% of the waveform window.
+    bool m_resumeVisualAnchorActive = false;
+    double m_resumeVisualAnchor = 0.5;
 
     std::thread m_worker;
     std::shared_ptr<abort_callback_impl> m_abort;
