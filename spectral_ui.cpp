@@ -1647,28 +1647,43 @@ private:
         begin = std::min(begin, count - 1);
         end = std::max(begin + 1, std::min(end, count));
 
-        uint64_t rms = 0, subBass = 0, bass = 0, lowMid = 0, mids = 0, highMid = 0, treble = 0;
+        uint64_t rms = 0;
+        uint64_t sub = 0, deepBass = 0, bass = 0, upperBass = 0;
+        uint64_t lowMid = 0, mids = 0, upperMid = 0, vocalBody = 0;
+        uint64_t presence = 0, attack = 0, highs = 0, air = 0;
         uint16_t peak = 0;
         for (size_t i = begin; i < end; ++i) {
             const auto& p = data.points[i];
             peak = std::max(peak, p.peak);
             rms += p.rms;
-            subBass += p.sub_bass;
+            sub += p.sub;
+            deepBass += p.deep_bass;
             bass += p.bass;
+            upperBass += p.upper_bass;
             lowMid += p.low_mid;
             mids += p.mids;
-            highMid += p.high_mid;
-            treble += p.treble;
+            upperMid += p.upper_mid;
+            vocalBody += p.vocal_body;
+            presence += p.presence;
+            attack += p.attack;
+            highs += p.highs;
+            air += p.air;
         }
         const uint64_t n = static_cast<uint64_t>(end - begin);
         out.peak = peak;
         out.rms = static_cast<uint16_t>(rms / n);
-        out.sub_bass = static_cast<uint8_t>(subBass / n);
+        out.sub = static_cast<uint8_t>(sub / n);
+        out.deep_bass = static_cast<uint8_t>(deepBass / n);
         out.bass = static_cast<uint8_t>(bass / n);
+        out.upper_bass = static_cast<uint8_t>(upperBass / n);
         out.low_mid = static_cast<uint8_t>(lowMid / n);
         out.mids = static_cast<uint8_t>(mids / n);
-        out.high_mid = static_cast<uint8_t>(highMid / n);
-        out.treble = static_cast<uint8_t>(treble / n);
+        out.upper_mid = static_cast<uint8_t>(upperMid / n);
+        out.vocal_body = static_cast<uint8_t>(vocalBody / n);
+        out.presence = static_cast<uint8_t>(presence / n);
+        out.attack = static_cast<uint8_t>(attack / n);
+        out.highs = static_cast<uint8_t>(highs / n);
+        out.air = static_cast<uint8_t>(air / n);
         return out;
     }
 
