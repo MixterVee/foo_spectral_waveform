@@ -17,7 +17,7 @@ namespace {
 static constexpr std::uint32_t kCacheVersion = 1;
 // Bump when the analyzer changes the meaning of bass/mids/treble. This changes
 // only waveform cache filenames; transport PCM uses its own preserved hash below.
-static constexpr std::uint32_t kSpectralCacheRevision = 3;
+static constexpr std::uint32_t kSpectralCacheRevision = 4;
 static constexpr std::uint32_t kStemCacheRevision = 2;
 static constexpr std::uint32_t kTransportCacheVersion = 1;
 static constexpr std::uint32_t kTransportCacheRevision = 1;
@@ -100,9 +100,9 @@ std::uint64_t track_hash(metadb_handle_ptr track) {
 
 std::uint64_t cache_hash_for_track(metadb_handle_ptr track, int mode) {
     auto hash = track_hash(track);
-    // Analyzer V3 stores six normalized spectral regions instead of three. Give
-    // those values a fresh waveform cache namespace so old three-band graphics
-    // cannot be silently reused after installing the component.
+    // Analyzer V4 stores twelve normalized spectral regions. Give those values a
+    // fresh waveform cache namespace so older three/six-band graphics cannot be
+    // silently reused after installing the component.
     hash = fnv1a64(&kSpectralCacheRevision, sizeof(kSpectralCacheRevision), hash);
     if (mode == 1 || mode == 2) {
         // Stem waveform revision is independent of the Original waveform cache.
