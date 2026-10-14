@@ -1,5 +1,6 @@
 #include "spectral_analyzer.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace spectral_waveform {
@@ -96,40 +97,59 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
 
     fft(real, imag);
 
-    double low = 0.0, mid = 0.0, high = 0.0;
+    // Six frequency regions give the palette enough information to distinguish
+    // sub/bass, low mids, vocals, presence and air instead of trying to derive a
+    // full DJ palette from only three values.
+    std::array<double, 6> energy{};
+    std::array<std::uint32_t, 6> bins{};
+
     for (std::size_t bin = 1; bin < m_window_size / 2; ++bin) {
         const double freq = (static_cast<double>(bin) * m_sample_rate) /
             static_cast<double>(m_window_size);
+        if (freq < 20.0 || freq > 20000.0) continue;
+
         const double re = real[bin];
         const double im = imag[bin];
         const double power = re * re + im * im;
 
-        if (freq < 20.0) continue;
-        if (freq < 250.0) low += power;
-        else if (freq < 4000.0) mid += power;
-        else if (freq <= 20000.0) high += power;
+        std::size_t band = 0;
+        if (freq < 90.0) band = 0;
+        else if (freq < 250.0) band = 1;
+        else if (freq < 700.0) band = 2;
+        else if (freq < 2000.0) band = 3;
+        else if (freq < 6000.0) band = 4;
+        else band = 5;
+
+        energy[band] += power;
+        ++bins[band];
     }
 
-    const double total = low + mid + high + 1.0e-20;
+    // Compare mean power per FFT bin, not raw band sums. Otherwise the very
+    // wide upper bands win merely because they contain more FFT bins. Gentle
+    // perceptual compensation and compression then keeps quieter presence/air
+    // information visible in mastered full-range material.
+    std::array<double, 6> mean{};
+    for (std::size_t i = 0; i < mean.size(); ++i) {
+        mean[i] = bins[i] > 0 ? energy[i] / static_cast<double>(bins[i]) : 0.0;
+    }
 
-    // Preserve RELATIVE spectral dominance instead of independently boosting
-    // every active band toward 255. The old *3 + clamp + log compression made
-    // ordinary full-range music look as if bass, mids and treble were all nearly
-    // maximal at once, leaving the palette too little information to distinguish
-    // kicks, vocals and cymbals.
-    //
-    // Mild perceptual compensation keeps the broad mid band from owning almost
-    // every frame and gives short high-frequency transients enough weight to be
-    // visible. After compensation the three stored values are normalized shares;
-    // together they describe one spectral mixture rather than three loudnesses.
-    const double low_share = low / total;
-    const double mid_share = mid / total;
-    const double high_share = high / total;
+    const double mean_total =
+        mean[0] + mean[1] + mean[2] + mean[3] + mean[4] + mean[5] + 1.0e-30;
 
-    const double low_weight = 1.15 * std::pow(low_share, 0.85);
-    const double mid_weight = 0.92 * std::pow(mid_share, 0.90);
-    const double high_weight = 1.30 * std::pow(high_share, 0.78);
-    const double weight_total = low_weight + mid_weight + high_weight + 1.0e-20;
+    static constexpr std::array<double, 6> gain{
+        0.88, 0.96, 1.00, 1.08, 1.22, 1.48
+    };
+    static constexpr std::array<double, 6> curve{
+        0.82, 0.82, 0.80, 0.78, 0.74, 0.68
+    };
+
+    std::array<double, 6> weight{};
+    double weight_total = 1.0e-30;
+    for (std::size_t i = 0; i < weight.size(); ++i) {
+        const double share = std::clamp(mean[i] / mean_total, 0.0, 1.0);
+        weight[i] = gain[i] * std::pow(share, curve[i]);
+        weight_total += weight[i];
+    }
 
     const auto encode_share = [weight_total](double value) -> std::uint8_t {
         const double normalized = std::clamp(value / weight_total, 0.0, 1.0);
@@ -141,9 +161,12 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
     waveform_point p;
     p.peak = static_cast<std::uint16_t>(std::lround(std::min(1.0f, peak) * 65535.0f));
     p.rms = static_cast<std::uint16_t>(std::lround(std::min(1.0, rms) * 65535.0));
-    p.bass = encode_share(low_weight);
-    p.mids = encode_share(mid_weight);
-    p.treble = encode_share(high_weight);
+    p.sub_bass = encode_share(weight[0]);
+    p.bass = encode_share(weight[1]);
+    p.low_mid = encode_share(weight[2]);
+    p.mids = encode_share(weight[3]);
+    p.high_mid = encode_share(weight[4]);
+    p.treble = encode_share(weight[5]);
     m_points.push_back(p);
 }
 
