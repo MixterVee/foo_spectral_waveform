@@ -1,8 +1,11 @@
-name: Build Native foo_spectral_waveform
+name: Build Spectral Waveform
 
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -63,30 +66,39 @@ jobs:
       - name: Package universal fb2k-component
         shell: pwsh
         run: |
-          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) {
-            throw "Built x64 DLL not found."
-          }
-          if (!(Test-Path "out\x86\foo_spectral_waveform.dll")) {
-            throw "Built Win32 DLL not found."
-          }
-
+          if (!(Test-Path "out\x64\foo_spectral_waveform.dll")) { throw "Built x64 DLL not found." }
+          if (!(Test-Path "out\x86\foo_spectral_waveform.dll")) { throw "Built Win32 DLL not found." }
           Remove-Item "stage" -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path "stage\x64" -Force | Out-Null
-
-          # 32-bit component DLL belongs at the package root.
           Copy-Item "out\x86\foo_spectral_waveform.dll" "stage\foo_spectral_waveform.dll"
-
-          # 64-bit component DLL belongs in the x64 subdirectory.
           Copy-Item "out\x64\foo_spectral_waveform.dll" "stage\x64\foo_spectral_waveform.dll"
-
           Remove-Item "foo_spectral_waveform.zip" -Force -ErrorAction SilentlyContinue
           Remove-Item "foo_spectral_waveform.fb2k-component" -Force -ErrorAction SilentlyContinue
-
           Compress-Archive -Path "stage\*" -DestinationPath "foo_spectral_waveform.zip" -Force
           Rename-Item "foo_spectral_waveform.zip" "foo_spectral_waveform.fb2k-component"
 
       - name: Upload universal component
         uses: actions/upload-artifact@v4
         with:
-          name: foo_spectral_waveform-universal
+          name: foo_spectral_waveform-0.6.1-universal
           path: foo_spectral_waveform.fb2k-component
+
+      - name: Prepare stable release asset
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          Copy-Item "foo_spectral_waveform.fb2k-component" "Spectral-Waveform-0.6.1-Universal-x86-x64.fb2k-component" -Force
+
+      - name: Publish GitHub latest release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v0.6.1" `
+            "Spectral-Waveform-0.6.1-Universal-x86-x64.fb2k-component" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --target "$env:GITHUB_SHA" `
+            --title "Spectral Waveform 0.6.1" `
+            --notes "Stable universal Win32/x64 release. Includes 12-band Serato-style spectral coloring, native Enter Play/Pause routing, zoom-scaled regular/fine playhead movement, solid pause/resume cursor behavior, same-track view preservation, and automatic waveform focus on new tracks." `
+            --latest
