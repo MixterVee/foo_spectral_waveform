@@ -41,6 +41,7 @@ static cfg_bool g_showTimeMarkers(guid_show_time_markers, true);
 
 static const wchar_t* kWindowClassName = L"foo_spectral_waveform_ui_v03";
 static constexpr UINT kMsgAnalysisReady = WM_APP + 0x351;
+static constexpr UINT kMsgTakeWaveformFocus = WM_APP + 0x352;
 static constexpr double kMinViewSpan = 0.02;
 static constexpr double kKeyboardPanFraction = 0.10;
 static constexpr int kLiveRefreshBehind = 160;
@@ -417,6 +418,21 @@ private:
         case kMsgAnalysisReady:
             invalidate_all();
             return 0;
+        case kMsgTakeWaveformFocus: {
+            // Defer focus until after foobar has finished updating the playlist
+            // for the new track. Only change keyboard focus while foobar's own
+            // top-level window is the foreground app; never activate foobar from
+            // the background.
+            if (IsWindowVisible(wnd) && IsWindowEnabled(wnd)) {
+                HWND root = GetAncestor(wnd, GA_ROOT);
+                HWND foreground = GetForegroundWindow();
+                if (foreground != nullptr &&
+                    (foreground == root || GetAncestor(foreground, GA_ROOT) == root)) {
+                    SetFocus(wnd);
+                }
+            }
+            return 0;
+        }
         case WM_NCDESTROY:
             SetWindowLongPtrW(wnd, GWLP_USERDATA, 0);
             if (m_wnd == wnd) m_wnd = nullptr;
@@ -2463,6 +2479,13 @@ private:
     }
 
     void on_playback_new_track(metadb_handle_ptr track) override {
+        // Let foobar complete its own playlist/selection focus changes first,
+        // then hand keyboard focus to the waveform so its arrow controls are
+        // immediately ready without a mouse click.
+        if (!track.is_empty() && m_wnd != nullptr) {
+            PostMessageW(m_wnd, kMsgTakeWaveformFocus, 0, 0);
+        }
+
         auto transport = find_transport_service();
         if (!transport.is_empty()) { try { transport->cancel_transport(); } catch (...) {} }
         m_touchHoldLatched = false;
