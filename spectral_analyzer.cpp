@@ -1,5 +1,6 @@
 #include "spectral_analyzer.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace spectral_waveform {
@@ -96,40 +97,80 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
 
     fft(real, imag);
 
-    double low = 0.0, mid = 0.0, high = 0.0;
+    // Twelve musical frequency regions. The FFT itself is unchanged; we simply
+    // preserve much more of its spectral detail for colour rendering.
+    std::array<double, 12> energy{};
+    std::array<std::uint32_t, 12> bins{};
+
     for (std::size_t bin = 1; bin < m_window_size / 2; ++bin) {
         const double freq = (static_cast<double>(bin) * m_sample_rate) /
             static_cast<double>(m_window_size);
+        if (freq < 20.0 || freq > 20000.0) continue;
+
         const double re = real[bin];
         const double im = imag[bin];
         const double power = re * re + im * im;
 
-        if (freq < 20.0) continue;
-        if (freq < 250.0) low += power;
-        else if (freq < 4000.0) mid += power;
-        else if (freq <= 20000.0) high += power;
+        std::size_t band = 0;
+        if (freq < 45.0) band = 0;
+        else if (freq < 70.0) band = 1;
+        else if (freq < 110.0) band = 2;
+        else if (freq < 180.0) band = 3;
+        else if (freq < 300.0) band = 4;
+        else if (freq < 500.0) band = 5;
+        else if (freq < 850.0) band = 6;
+        else if (freq < 1400.0) band = 7;
+        else if (freq < 2500.0) band = 8;
+        else if (freq < 4500.0) band = 9;
+        else if (freq < 8000.0) band = 10;
+        else band = 11;
+
+        energy[band] += power;
+        ++bins[band];
     }
 
-    const double total = low + mid + high + 1.0e-20;
+    // Use mean power per FFT bin so wider high-frequency bands do not win just
+    // because they contain more bins.
+    std::array<double, 12> mean{};
+    for (std::size_t i = 0; i < mean.size(); ++i) {
+        mean[i] = bins[i] > 0 ? energy[i] / static_cast<double>(bins[i]) : 0.0;
+    }
 
-    // Preserve RELATIVE spectral dominance instead of independently boosting
-    // every active band toward 255. The old *3 + clamp + log compression made
-    // ordinary full-range music look as if bass, mids and treble were all nearly
-    // maximal at once, leaving the palette too little information to distinguish
-    // kicks, vocals and cymbals.
-    //
-    // Mild perceptual compensation keeps the broad mid band from owning almost
-    // every frame and gives short high-frequency transients enough weight to be
-    // visible. After compensation the three stored values are normalized shares;
-    // together they describe one spectral mixture rather than three loudnesses.
-    const double low_share = low / total;
-    const double mid_share = mid / total;
-    const double high_share = high / total;
+    // Work in dB so the natural downward spectral slope can be corrected in
+    // perceptually meaningful units. The previous power-domain tilt was only
+    // about 2 dB/octave, which left low bands dominating nearly every frame.
+    static constexpr std::array<double, 12> center_hz{
+        30.0, 56.1, 87.7, 140.7, 232.4, 387.3,
+        651.9, 1090.9, 1870.8, 3354.1, 6000.0, 12649.1
+    };
+    constexpr double kTiltReferenceHz = 250.0;
+    constexpr double kTiltDbPerOctave = 4.25;
+    constexpr double kSoftmaxTemperatureDb = 7.5;
 
-    const double low_weight = 1.15 * std::pow(low_share, 0.85);
-    const double mid_weight = 0.92 * std::pow(mid_share, 0.90);
-    const double high_weight = 1.30 * std::pow(high_share, 0.78);
-    const double weight_total = low_weight + mid_weight + high_weight + 1.0e-20;
+    std::array<double, 12> corrected_db{};
+    double max_db = -300.0;
+    for (std::size_t i = 0; i < corrected_db.size(); ++i) {
+        const double db = 10.0 * std::log10(std::max(mean[i], 1.0e-30));
+        const double octaves = std::log2(center_hz[i] / kTiltReferenceHz);
+        corrected_db[i] = db + kTiltDbPerOctave * octaves;
+        max_db = std::max(max_db, corrected_db[i]);
+    }
+
+    // Convert corrected dB values to soft relative weights. This keeps the
+    // strongest regions prominent but still allows bands within roughly one
+    // musical dynamic step to contribute meaningful colour.
+    static constexpr std::array<double, 12> gain{
+        1.05, 1.04, 1.03, 1.02, 1.00, 1.00,
+        1.01, 1.02, 1.04, 1.06, 1.09, 1.12
+    };
+
+    std::array<double, 12> weight{};
+    double weight_total = 1.0e-30;
+    for (std::size_t i = 0; i < weight.size(); ++i) {
+        const double delta = corrected_db[i] - max_db;
+        weight[i] = gain[i] * std::exp(delta / kSoftmaxTemperatureDb);
+        weight_total += weight[i];
+    }
 
     const auto encode_share = [weight_total](double value) -> std::uint8_t {
         const double normalized = std::clamp(value / weight_total, 0.0, 1.0);
@@ -141,9 +182,18 @@ void spectral_analyzer::analyze_window(const float* mono, std::size_t count) {
     waveform_point p;
     p.peak = static_cast<std::uint16_t>(std::lround(std::min(1.0f, peak) * 65535.0f));
     p.rms = static_cast<std::uint16_t>(std::lround(std::min(1.0, rms) * 65535.0));
-    p.bass = encode_share(low_weight);
-    p.mids = encode_share(mid_weight);
-    p.treble = encode_share(high_weight);
+    p.sub = encode_share(weight[0]);
+    p.deep_bass = encode_share(weight[1]);
+    p.bass = encode_share(weight[2]);
+    p.upper_bass = encode_share(weight[3]);
+    p.low_mid = encode_share(weight[4]);
+    p.mids = encode_share(weight[5]);
+    p.upper_mid = encode_share(weight[6]);
+    p.vocal_body = encode_share(weight[7]);
+    p.presence = encode_share(weight[8]);
+    p.attack = encode_share(weight[9]);
+    p.highs = encode_share(weight[10]);
+    p.air = encode_share(weight[11]);
     m_points.push_back(p);
 }
 
