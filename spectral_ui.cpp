@@ -175,7 +175,9 @@ enum class follow_mode {
     paged,
 };
 
-class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
+class spectral_waveform_instance : public ui_element_instance,
+    private play_callback_impl_base,
+    private message_filter_impl_base {
 public:
     spectral_waveform_instance(HWND parent, ui_element_config::ptr, ui_element_instance_callback::ptr callback)
         : play_callback_impl_base(
@@ -256,6 +258,38 @@ private:
         return DefWindowProcW(wnd, msg, wp, lp);
     }
 
+    bool pretranslate_message(MSG* msg) override {
+        if (msg == nullptr || msg->message != WM_KEYDOWN || msg->wParam != VK_RETURN)
+            return false;
+
+        // Leave modified Enter combinations to foobar/Windows.
+        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+            (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
+            (GetKeyState(VK_MENU) & 0x8000) != 0) {
+            return false;
+        }
+
+        // Do not steal Enter from actual text-edit controls.
+        wchar_t className[64]{};
+        if (msg->hwnd != nullptr &&
+            GetClassNameW(msg->hwnd, className, _countof(className)) > 0) {
+            const bool editControl =
+                _wcsicmp(className, L"Edit") == 0 ||
+                _wcsnicmp(className, L"RichEdit", 8) == 0 ||
+                _wcsnicmp(className, L"RICHEDIT", 8) == 0;
+            if (editControl) return false;
+        }
+
+        const bool repeat =
+            (msg->lParam & (static_cast<LPARAM>(1) << 30)) != 0;
+        if (!repeat) {
+            // Route Enter to foobar2000's own Playback -> Play or pause command.
+            // Spectral Waveform does not implement transport state here.
+            standard_commands::main_play_or_pause();
+        }
+        return true;
+    }
+
     LRESULT handle_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_ERASEBKGND: return 1;
@@ -291,7 +325,11 @@ private:
             show_context_menu(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_GETDLGCODE:
-            return DLGC_WANTARROWS | DLGC_WANTCHARS;
+            if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_UP || wp == VK_DOWN)
+                return DLGC_WANTARROWS;
+            if (wp == VK_SPACE || wp == 'H' || wp == 'R')
+                return DLGC_WANTCHARS;
+            return 0;
         case WM_KEYDOWN:
             switch (wp) {
             case VK_SPACE: {
