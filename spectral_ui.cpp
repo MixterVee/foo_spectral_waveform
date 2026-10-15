@@ -41,6 +41,7 @@ static cfg_bool g_showTimeMarkers(guid_show_time_markers, true);
 
 static const wchar_t* kWindowClassName = L"foo_spectral_waveform_ui_v03";
 static constexpr UINT kMsgAnalysisReady = WM_APP + 0x351;
+static constexpr UINT kMsgTakeWaveformFocus = WM_APP + 0x352;
 static constexpr double kMinViewSpan = 0.02;
 static constexpr double kKeyboardPanFraction = 0.10;
 static constexpr int kLiveRefreshBehind = 160;
@@ -175,7 +176,9 @@ enum class follow_mode {
     paged,
 };
 
-class spectral_waveform_instance : public ui_element_instance, private play_callback_impl_base {
+class spectral_waveform_instance : public ui_element_instance,
+    private play_callback_impl_base,
+    private message_filter_impl_base {
 public:
     spectral_waveform_instance(HWND parent, ui_element_config::ptr, ui_element_instance_callback::ptr callback)
         : play_callback_impl_base(
@@ -256,11 +259,45 @@ private:
         return DefWindowProcW(wnd, msg, wp, lp);
     }
 
+    bool pretranslate_message(MSG* msg) override {
+        if (msg == nullptr || msg->message != WM_KEYDOWN || msg->wParam != VK_RETURN)
+            return false;
+
+        // Leave modified Enter combinations to foobar/Windows.
+        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+            (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
+            (GetKeyState(VK_MENU) & 0x8000) != 0) {
+            return false;
+        }
+
+        // Do not steal Enter from actual text-edit controls.
+        wchar_t className[64]{};
+        if (msg->hwnd != nullptr &&
+            GetClassNameW(msg->hwnd, className, _countof(className)) > 0) {
+            const bool editControl =
+                _wcsicmp(className, L"Edit") == 0 ||
+                _wcsnicmp(className, L"RichEdit", 8) == 0 ||
+                _wcsnicmp(className, L"RICHEDIT", 8) == 0;
+            if (editControl) return false;
+        }
+
+        const bool repeat =
+            (msg->lParam & (static_cast<LPARAM>(1) << 30)) != 0;
+        if (!repeat) {
+            // Route Enter to foobar2000's own Playback -> Play or pause command.
+            // Spectral Waveform does not implement transport state here.
+            standard_commands::main_play_or_pause();
+        }
+        return true;
+    }
+
     LRESULT handle_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
         case WM_TIMER: {
+            remember_live_playback_position();
+            apply_pending_restart_seek();
             update_reverse_visual_clock();
             update_scrub_motion_gate();
             update_transport_release_wait();
@@ -289,15 +326,22 @@ private:
             show_context_menu(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_GETDLGCODE:
+            // Claim the waveform's keyboard input consistently. Enter is still
+            // intercepted earlier by the global message filter and routed to
+            // foobar's native Play or pause command.
             return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_KEYDOWN:
             switch (wp) {
-            case VK_SPACE:
+            case VK_SPACE: {
+                const bool repeat = (lp & (static_cast<LPARAM>(1) << 30)) != 0;
+                if (repeat) return 0;
                 if (m_viewSpan < 0.9995) {
-                    m_followPlayhead = true;
-                    recenter_on_playhead();
+                    m_followPlayhead = !m_followPlayhead;
+                    if (m_followPlayhead) recenter_on_playhead();
+                    else invalidate_frame();
                 }
                 return 0;
+            }
             case 'H':
                 toggle_touch_hold();
                 return 0;
@@ -319,11 +363,17 @@ private:
                 zoom_from_keyboard(false);
                 return 0;
             case VK_LEFT:
-                pan_from_keyboard(-1);
+            case VK_RIGHT: {
+                auto pc = playback_control::get();
+                if (!pc->is_playing() || pc->is_paused()) {
+                    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                    nudge_stopped_playhead(
+                        wp == VK_LEFT ? -1 : 1, ctrl);
+                } else {
+                    pan_from_keyboard(wp == VK_LEFT ? -1 : 1);
+                }
                 return 0;
-            case VK_RIGHT:
-                pan_from_keyboard(1);
-                return 0;
+            }
             }
             break;
         case WM_KEYUP:
@@ -347,6 +397,7 @@ private:
             m_dragging = false;
             m_dragMoved = false;
             m_centerScrubbing = false;
+            m_dragCanCenterScrub = false;
             m_scrubAudibleActive = false;
             // If capture is lost unexpectedly (Alt-Tab, another popup, etc.),
             // commit the virtual platter position exactly once.
@@ -367,6 +418,21 @@ private:
         case kMsgAnalysisReady:
             invalidate_all();
             return 0;
+        case kMsgTakeWaveformFocus: {
+            // Defer focus until after foobar has finished updating the playlist
+            // for the new track. Only change keyboard focus while foobar's own
+            // top-level window is the foreground app; never activate foobar from
+            // the background.
+            if (IsWindowVisible(wnd) && IsWindowEnabled(wnd)) {
+                HWND root = GetAncestor(wnd, GA_ROOT);
+                HWND foreground = GetForegroundWindow();
+                if (foreground != nullptr &&
+                    (foreground == root || GetAncestor(foreground, GA_ROOT) == root)) {
+                    SetFocus(wnd);
+                }
+            }
+            return 0;
+        }
         case WM_NCDESTROY:
             SetWindowLongPtrW(wnd, GWLP_USERDATA, 0);
             if (m_wnd == wnd) m_wnd = nullptr;
@@ -871,6 +937,7 @@ private:
     }
 
     void center_on_playhead_once() {
+        m_resumeVisualAnchorActive = false;
         if (m_wnd == nullptr || m_viewSpan >= 0.9995) return;
         double positionFrac = 0.0;
         if (!playback_fraction(positionFrac)) return;
@@ -881,6 +948,7 @@ private:
 
     void recenter_on_playhead() {
         m_releaseGlideActive = false;
+        m_resumeVisualAnchorActive = false;
         center_on_playhead_once();
     }
 
@@ -964,7 +1032,10 @@ private:
         const double oldStart = m_viewStart;
 
         if (m_followMode == follow_mode::centered) {
-            m_viewStart = positionFrac - m_viewSpan * 0.5;
+            const double anchor = m_resumeVisualAnchorActive
+                ? std::clamp(m_resumeVisualAnchor, 0.0, 1.0)
+                : 0.5;
+            m_viewStart = positionFrac - m_viewSpan * anchor;
             clamp_view();
         } else {
             const double pageEnd = view_end();
@@ -1022,9 +1093,16 @@ private:
         }
 
         auto pc = playback_control::get();
-        if (!pc->is_playing()) return -1;
         double positionFrac = 0.0;
-        if (!playback_fraction(positionFrac)) return -1;
+        if (!pc->is_playing()) {
+            if (!m_stoppedPositionValid) return -1;
+            positionFrac = std::clamp(m_stoppedPositionFraction, 0.0, 1.0);
+        } else if (m_visualPauseFreeze &&
+            (pc->is_paused() || m_visualPauseReleasePending)) {
+            positionFrac = std::clamp(m_visualPauseFraction, 0.0, 1.0);
+        } else if (!playback_fraction(positionFrac)) {
+            return -1;
+        }
         if (positionFrac < m_viewStart || positionFrac > view_end()) return -1;
         const double visibleFrac = (positionFrac - m_viewStart) / m_viewSpan;
         return static_cast<int>(visibleFrac * std::max(0, width - 1));
@@ -1134,6 +1212,7 @@ private:
 
     void pan_from_keyboard(int direction) {
         if (direction == 0 || m_viewSpan >= 0.9995) return;
+        m_resumeVisualAnchorActive = false;
         m_followPlayhead = false;
         m_viewStart += static_cast<double>(direction) * m_viewSpan * kKeyboardPanFraction;
         clamp_view();
@@ -1200,9 +1279,10 @@ private:
         AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuZoomOut, L"Zoom Out\tDown Arrow");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuFitTrack, L"Fit Entire Track");
-        AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0), kMenuCenterPlayhead, L"Center on Playhead\tSpace");
+        AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0),
+            kMenuCenterPlayhead, L"Center on Playhead");
         AppendMenuW(menu, MF_STRING | (m_viewSpan >= 0.9995 ? MF_GRAYED : 0) |
-            (m_followPlayhead ? MF_CHECKED : 0), kMenuFollowPlayhead, L"Follow Playhead");
+            (m_followPlayhead ? MF_CHECKED : 0), kMenuFollowPlayhead, L"Follow Playhead\tSpace");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (m_followMode == follow_mode::centered ? MF_CHECKED : 0),
             kMenuFollowCentered, L"Follow Mode: Centered Scroll");
@@ -1468,32 +1548,18 @@ private:
         m_dragStartX = x;
         m_dragStartView = m_viewStart;
         m_dragStartTick = GetTickCount64();
-        // Do not seek immediately on the first few pixels of a grab. If the
-        // gesture is short, release performs the only seek and feels much cleaner.
         m_scrubLastSeekTick = m_dragStartTick;
         m_scrubLastMotionTick = m_dragStartTick;
         m_scrubLastMotionX = x;
         m_scrubAudibleActive = false;
         m_centerScrubbing = false;
 
-        double positionFrac = 0.0;
+        // A simple click must remain a plain foobar seek. Only arm the special
+        // centered scrub/hold transport after the pointer actually moves far
+        // enough to become a drag.
         auto pc = playback_control::get();
-        if (pc->is_playing() &&
-            pc->playback_can_seek() &&
-            playback_fraction(positionFrac)) {
-
-            m_centerScrubbing = true;
-            m_scrubStartPosition = positionFrac;
-            m_scrubTargetPosition = positionFrac;
-            m_scrubAnchorX = std::clamp(
-                (positionFrac - m_viewStart) / m_viewSpan, 0.0, 1.0);
-            m_touchHoldPosition = positionFrac;
-            m_touchHoldAnchorX = m_scrubAnchorX;
-
-            // Keep foobar's audio clock alive; Stem Separator replaces its output
-            // with silence so the platter is audibly stationary and can still jog.
-            if (!set_transport_hold(positionFrac)) pause_for_touch_fallback();
-        }
+        m_dragCanCenterScrub =
+            pc->is_playing() && !pc->is_paused() && pc->playback_can_seek();
 
         SetCapture(m_wnd);
     }
@@ -1514,9 +1580,28 @@ private:
         const int dx = x - m_dragStartX;
         if (std::abs(dx) >= 3) {
             m_dragMoved = true;
-            if (!m_centerScrubbing) m_followPlayhead = false;
         }
         if (!m_dragMoved) return;
+
+        if (!m_centerScrubbing && m_dragCanCenterScrub) {
+            double positionFrac = 0.0;
+            auto pc = playback_control::get();
+            if (pc->is_playing() && !pc->is_paused() &&
+                pc->playback_can_seek() && playback_fraction(positionFrac)) {
+                m_centerScrubbing = true;
+                m_scrubStartPosition = positionFrac;
+                m_scrubTargetPosition = positionFrac;
+                m_scrubAnchorX = std::clamp(
+                    (positionFrac - m_viewStart) / m_viewSpan, 0.0, 1.0);
+                m_touchHoldPosition = positionFrac;
+                m_touchHoldAnchorX = m_scrubAnchorX;
+
+                // Only a real drag enters the special platter hold path.
+                if (!set_transport_hold(positionFrac)) pause_for_touch_fallback();
+            }
+        }
+
+        if (!m_centerScrubbing) m_followPlayhead = false;
         if (m_viewSpan >= 0.9995 && !m_centerScrubbing) return;
 
         if (m_centerScrubbing) {
@@ -1565,6 +1650,7 @@ private:
         m_dragging = false;
         m_dragMoved = false;
         m_centerScrubbing = false;
+        m_dragCanCenterScrub = false;
         m_scrubAudibleActive = false;
         if (GetCapture() == m_wnd) ReleaseCapture();
 
@@ -1647,22 +1733,43 @@ private:
         begin = std::min(begin, count - 1);
         end = std::max(begin + 1, std::min(end, count));
 
-        uint64_t rms = 0, bass = 0, mids = 0, treble = 0;
+        uint64_t rms = 0;
+        uint64_t sub = 0, deepBass = 0, bass = 0, upperBass = 0;
+        uint64_t lowMid = 0, mids = 0, upperMid = 0, vocalBody = 0;
+        uint64_t presence = 0, attack = 0, highs = 0, air = 0;
         uint16_t peak = 0;
         for (size_t i = begin; i < end; ++i) {
             const auto& p = data.points[i];
             peak = std::max(peak, p.peak);
             rms += p.rms;
+            sub += p.sub;
+            deepBass += p.deep_bass;
             bass += p.bass;
+            upperBass += p.upper_bass;
+            lowMid += p.low_mid;
             mids += p.mids;
-            treble += p.treble;
+            upperMid += p.upper_mid;
+            vocalBody += p.vocal_body;
+            presence += p.presence;
+            attack += p.attack;
+            highs += p.highs;
+            air += p.air;
         }
         const uint64_t n = static_cast<uint64_t>(end - begin);
         out.peak = peak;
         out.rms = static_cast<uint16_t>(rms / n);
+        out.sub = static_cast<uint8_t>(sub / n);
+        out.deep_bass = static_cast<uint8_t>(deepBass / n);
         out.bass = static_cast<uint8_t>(bass / n);
+        out.upper_bass = static_cast<uint8_t>(upperBass / n);
+        out.low_mid = static_cast<uint8_t>(lowMid / n);
         out.mids = static_cast<uint8_t>(mids / n);
-        out.treble = static_cast<uint8_t>(treble / n);
+        out.upper_mid = static_cast<uint8_t>(upperMid / n);
+        out.vocal_body = static_cast<uint8_t>(vocalBody / n);
+        out.presence = static_cast<uint8_t>(presence / n);
+        out.attack = static_cast<uint8_t>(attack / n);
+        out.highs = static_cast<uint8_t>(highs / n);
+        out.air = static_cast<uint8_t>(air / n);
         return out;
     }
 
@@ -2119,6 +2226,126 @@ private:
         EndPaint(m_wnd, &ps);
     }
 
+    void remember_live_playback_position() {
+        auto pc = playback_control::get();
+        if (!pc->is_playing() || pc->is_paused()) return;
+
+        double positionFrac = 0.0;
+        if (!playback_fraction(positionFrac)) return;
+        positionFrac = std::clamp(positionFrac, 0.0, 1.0);
+
+        if (m_visualPauseFreeze && m_visualPauseReleasePending) {
+            const double length = pc->playback_get_length_ex();
+            const double tolerance = length > 0.0
+                ? std::max(1.0e-9, 0.005 / length)
+                : 1.0e-9;
+
+            // Keep drawing the exact paused position while foobar's playback
+            // clock resumes from a few milliseconds behind. As soon as the
+            // native clock reaches/passes what the user saw, hand control back.
+            if (positionFrac + tolerance < m_visualPauseFraction) return;
+
+            m_visualPauseFreeze = false;
+            m_visualPauseReleasePending = false;
+            invalidate_playhead();
+        }
+
+        m_lastPlaybackFraction = positionFrac;
+        m_lastPlaybackFractionValid = true;
+    }
+
+    void apply_pending_restart_seek() {
+        if (!m_pendingRestartSeek) return;
+
+        auto pc = playback_control::get();
+        if (!pc->is_playing()) return;
+
+        metadb_handle_ptr nowPlaying;
+        if (!pc->get_now_playing(nowPlaying) || nowPlaying.is_empty()) return;
+        const bool sameTrack =
+            nowPlaying->get_subsong_index() == m_pendingRestartTrackSubsong &&
+            m_pendingRestartTrackPath == nowPlaying->get_path();
+        if (!sameTrack) {
+            m_pendingRestartSeek = false;
+            return;
+        }
+
+        const double length = pc->playback_get_length_ex();
+        if (length <= 0.0 || !pc->playback_can_seek()) return;
+
+        const double target = std::clamp(m_pendingRestartFraction, 0.0, 1.0);
+        m_pendingRestartSeek = false;
+        pc->playback_seek(target * length);
+
+        m_lastPlaybackFraction = target;
+        m_lastPlaybackFractionValid = true;
+
+        // Resume from the existing stopped visual position. Centered follow, if
+        // enabled, uses m_resumeVisualAnchor instead of snapping to 50%.
+        invalidate_playhead();
+    }
+
+    void nudge_stopped_playhead(int direction, bool fine) {
+        if (direction == 0) return;
+
+        auto pc = playback_control::get();
+        const bool paused = pc->is_playing() && pc->is_paused();
+        if (pc->is_playing() && !paused) return;
+
+        // Cursor travel is defined by the current visible window, not a fixed
+        // number of seconds. Regular arrows are zoom-scaled; Ctrl+Arrow is four
+        // times finer/slower for precise cue and future loop positioning.
+        const double visibleStep = m_viewSpan * (fine ? 0.00025 : 0.001);
+
+        double position = 0.0;
+        if (paused) {
+            if (m_visualPauseFreeze) {
+                position = m_visualPauseFraction;
+            } else if (!playback_fraction(position)) {
+                position = m_lastPlaybackFractionValid
+                    ? m_lastPlaybackFraction : 0.0;
+            }
+        } else {
+            position = m_stoppedPositionValid
+                ? m_stoppedPositionFraction
+                : (m_lastPlaybackFractionValid ? m_lastPlaybackFraction : 0.0);
+        }
+
+        position = std::clamp(
+            position + static_cast<double>(direction) * visibleStep,
+            0.0, 1.0);
+
+        if (paused) {
+            // Move foobar's paused transport position too, but keep playback
+            // paused. Hold the requested visual cursor exactly through the seek.
+            const double length = pc->playback_get_length_ex();
+            if (length <= 0.0 || !pc->playback_can_seek()) return;
+
+            m_visualPauseFraction = position;
+            m_visualPauseFreeze = true;
+            m_visualPauseReleasePending = false;
+            m_keyboardNudgeSeekPending = true;
+            m_lastPlaybackFraction = position;
+            m_lastPlaybackFractionValid = true;
+            pc->playback_seek(position * length);
+        } else {
+            m_stoppedPositionFraction = position;
+            m_stoppedPositionValid = true;
+            m_lastPlaybackFraction = position;
+            m_lastPlaybackFractionValid = true;
+        }
+
+        // Keep keyboard positioning visible without needlessly recentering.
+        if (m_viewSpan < 0.9995 &&
+            (position < m_viewStart || position > view_end())) {
+            m_viewStart = std::clamp(
+                position - m_viewSpan * 0.5, 0.0, 1.0 - m_viewSpan);
+            invalidate_all();
+        } else {
+            invalidate_playhead();
+        }
+    }
+
     void seek_from_x(int x) {
         if (m_wnd == nullptr) return;
         RECT rc{};
@@ -2126,15 +2353,36 @@ private:
         const int width = rc.right - rc.left;
         if (width <= 1) return;
 
-        auto pc = playback_control::get();
-        if (!pc->is_playing() || !pc->playback_can_seek()) return;
-        const double length = pc->playback_get_length_ex();
-        if (length <= 0.0) return;
+        const double visible = std::clamp(
+            static_cast<double>(x) / static_cast<double>(width - 1), 0.0, 1.0);
+        const double trackFrac = std::clamp(
+            m_viewStart + visible * m_viewSpan, 0.0, 1.0);
 
-        const double visible = std::clamp(static_cast<double>(x) / static_cast<double>(width - 1), 0.0, 1.0);
-        const double trackFrac = std::clamp(m_viewStart + visible * m_viewSpan, 0.0, 1.0);
-        pc->playback_seek(trackFrac * length);
-        if (m_followPlayhead) recenter_on_playhead();
+        auto pc = playback_control::get();
+        if (pc->is_playing()) {
+            if (!pc->playback_can_seek()) return;
+            const double length = pc->playback_get_length_ex();
+            if (length <= 0.0) return;
+
+            // Preserve the existing transport state: playing stays playing,
+            // paused stays paused.
+            pc->playback_seek(trackFrac * length);
+            m_lastPlaybackFraction = trackFrac;
+            m_lastPlaybackFractionValid = true;
+            if (m_followPlayhead) recenter_on_playhead();
+            else invalidate_playhead();
+            return;
+        }
+
+        // Stopped click = move the playhead only. Playback remains stopped until
+        // the user explicitly presses Play.
+        if (m_currentTrack.is_empty()) return;
+        m_stoppedPositionFraction = trackFrac;
+        m_stoppedPositionValid = true;
+        m_lastPlaybackFraction = trackFrac;
+        m_lastPlaybackFractionValid = true;
+        m_resumeVisualAnchorActive = false;
+        invalidate_playhead();
     }
 
     void stop_analysis() {
@@ -2231,6 +2479,13 @@ private:
     }
 
     void on_playback_new_track(metadb_handle_ptr track) override {
+        // Let foobar complete its own playlist/selection focus changes first,
+        // then hand keyboard focus to the waveform so its arrow controls are
+        // immediately ready without a mouse click.
+        if (!track.is_empty() && m_wnd != nullptr) {
+            PostMessageW(m_wnd, kMsgTakeWaveformFocus, 0, 0);
+        }
+
         auto transport = find_transport_service();
         if (!transport.is_empty()) { try { transport->cancel_transport(); } catch (...) {} }
         m_touchHoldLatched = false;
@@ -2246,9 +2501,80 @@ private:
         m_reverseReleaseVisualLastTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
-        start_analysis(track);
+        m_visualPauseFreeze = false;
+        m_visualPauseReleasePending = false;
+        m_keyboardNudgeSeekPending = false;
+
+        // Test16: the live on-screen view is authoritative. If the same track is
+        // restarted after Stop, preserve whatever zoom/pan/follow state exists
+        // *now*, including changes the user made while playback was stopped.
+        bool sameCurrentTrack = false;
+        if (!m_currentTrack.is_empty() && !track.is_empty()) {
+            sameCurrentTrack =
+                m_currentTrack->get_subsong_index() == track->get_subsong_index() &&
+                std::strcmp(m_currentTrack->get_path(), track->get_path()) == 0;
+        }
+
+        bool sameStoppedTrack = false;
+        if (m_stoppedTrackValid && !track.is_empty()) {
+            sameStoppedTrack =
+                m_stoppedTrackSubsong == track->get_subsong_index() &&
+                m_stoppedTrackPath == track->get_path();
+        }
+
+        const bool preserveView = sameCurrentTrack || sameStoppedTrack;
+
+        // If the user pressed Play after an explicit Stop, seek back to the
+        // stored stopped playhead once foobar has re-opened the same track.
+        if (sameStoppedTrack && m_stoppedPositionValid) {
+            m_pendingRestartSeek = true;
+            m_pendingRestartFraction = m_stoppedPositionFraction;
+            m_pendingRestartTrackPath = track->get_path();
+            m_pendingRestartTrackSubsong = track->get_subsong_index();
+
+            if (m_viewSpan < 0.9995 &&
+                m_stoppedPositionFraction >= m_viewStart &&
+                m_stoppedPositionFraction <= view_end()) {
+                m_resumeVisualAnchor = std::clamp(
+                    (m_stoppedPositionFraction - m_viewStart) / m_viewSpan,
+                    0.0, 1.0);
+                m_resumeVisualAnchorActive = true;
+            } else {
+                m_resumeVisualAnchorActive = false;
+            }
+        } else {
+            m_pendingRestartSeek = false;
+            m_resumeVisualAnchorActive = false;
+        }
+
+        start_analysis(track, !preserveView);
+
+        // A genuinely different song resets normally and clears the old stopped
+        // transport position so it cannot leak into another track.
+        if (!sameStoppedTrack) {
+            m_stoppedTrackValid = false;
+            m_stoppedPositionValid = false;
+            m_lastPlaybackFractionValid = false;
+        }
     }
-    void on_playback_stop(play_control::t_stop_reason) override {
+    void on_playback_stop(play_control::t_stop_reason reason) override {
+        // Explicit Stop remembers both the track identity and the latest live
+        // playhead position. Zoom/pan/follow are NOT snapshotted here; whatever
+        // the user changes while stopped remains the authoritative view.
+        if (reason == play_control::stop_reason_user && !m_currentTrack.is_empty()) {
+            m_stoppedTrackPath = m_currentTrack->get_path();
+            m_stoppedTrackSubsong = m_currentTrack->get_subsong_index();
+            m_stoppedTrackValid = true;
+            if (m_lastPlaybackFractionValid) {
+                m_stoppedPositionFraction =
+                    std::clamp(m_lastPlaybackFraction, 0.0, 1.0);
+                m_stoppedPositionValid = true;
+            }
+        } else if (reason != play_control::stop_reason_starting_another) {
+            m_stoppedTrackValid = false;
+            m_stoppedPositionValid = false;
+        }
+
         auto transport = find_transport_service();
         if (!transport.is_empty()) { try { transport->cancel_transport(); } catch (...) {} }
         m_touchHoldLatched = false;
@@ -2264,10 +2590,39 @@ private:
         m_reverseReleaseVisualLastTick = 0;
         m_transportReleasePending = false;
         m_releasePauseOwned = false;
+        m_visualPauseFreeze = false;
+        m_visualPauseReleasePending = false;
+        m_keyboardNudgeSeekPending = false;
         stop_analysis();
         invalidate_all(false);
     }
     void on_playback_seek(double) override {
+        auto pc = playback_control::get();
+        if (pc->is_playing() && pc->is_paused()) {
+            if (m_keyboardNudgeSeekPending) {
+                // nudge_stopped_playhead() already chose the exact cursor
+                // location. Do not replace it with a decoder-rounded position.
+                m_keyboardNudgeSeekPending = false;
+                m_visualPauseFreeze = true;
+                m_visualPauseReleasePending = false;
+                m_lastPlaybackFraction = m_visualPauseFraction;
+                m_lastPlaybackFractionValid = true;
+            } else {
+                double positionFrac = 0.0;
+                if (playback_fraction(positionFrac)) {
+                    m_visualPauseFraction =
+                        std::clamp(positionFrac, 0.0, 1.0);
+                    m_visualPauseFreeze = true;
+                    m_visualPauseReleasePending = false;
+                    m_lastPlaybackFraction = m_visualPauseFraction;
+                    m_lastPlaybackFractionValid = true;
+                }
+            }
+        } else {
+            m_keyboardNudgeSeekPending = false;
+            remember_live_playback_position();
+        }
+
         // Continuous seeks generated by a centered grab must not fight the user's
         // drag by recentering the view on every seek callback.
         if (m_centerScrubbing || m_touchHoldLatched || reverse_active() ||
@@ -2279,15 +2634,38 @@ private:
         else invalidate_playhead();
     }
     void on_playback_pause(bool paused) override {
-        // If playback is resumed elsewhere while a latched hold is idle, treat
-        // that external resume as an explicit release and keep the UI truthful.
-        if (!paused && m_touchHoldLatched && !m_centerScrubbing) {
-            m_touchHoldLatched = false;
-            m_touchPauseOwned = false;
+        // Foobar owns Play/Pause entirely. We only control what the waveform
+        // draws so the cursor does not visibly correct backward on pause/resume.
+        if (paused) {
+            double freeze = 0.0;
+            if (m_lastPlaybackFractionValid) {
+                freeze = m_lastPlaybackFraction;
+                m_visualPauseFreeze = true;
+            } else if (playback_fraction(freeze)) {
+                m_visualPauseFreeze = true;
+            }
+
+            if (m_visualPauseFreeze) {
+                m_visualPauseFraction = std::clamp(freeze, 0.0, 1.0);
+                m_visualPauseReleasePending = false;
+            }
+        } else {
+            if (m_touchHoldLatched && !m_centerScrubbing) {
+                m_touchHoldLatched = false;
+                m_touchPauseOwned = false;
+            }
+            if (m_visualPauseFreeze) {
+                // Do not clear immediately: foobar's native clock can resume a
+                // few milliseconds behind. The timer releases this freeze once
+                // that clock catches the exact cursor position the user saw.
+                m_visualPauseReleasePending = true;
+            }
         }
         invalidate_frame();
     }
+
     void on_playback_time(double) override {
+        remember_live_playback_position();
         if (!m_followPlayhead) invalidate_playhead();
     }
 
@@ -2314,6 +2692,7 @@ private:
     bool m_dragging = false;
     bool m_dragMoved = false;
     bool m_centerScrubbing = false;
+    bool m_dragCanCenterScrub = false;
     int m_dragStartX = 0;
     double m_dragStartView = 0.0;
     ULONGLONG m_dragStartTick = 0;
@@ -2365,6 +2744,37 @@ private:
     mutable std::mutex m_waveformMutex;
     std::shared_ptr<const spectral_waveform::waveform_data> m_waveform;
     metadb_handle_ptr m_currentTrack;
+
+    // Track identity retained across Stop so restarting the same song preserves
+    // the current live view without restoring an obsolete stop-time zoom value.
+    bool m_stoppedTrackValid = false;
+    std::string m_stoppedTrackPath;
+    t_uint32 m_stoppedTrackSubsong = 0;
+
+    // Visible/remembered transport cursor while playback is stopped.
+    bool m_stoppedPositionValid = false;
+    double m_stoppedPositionFraction = 0.0;
+    bool m_lastPlaybackFractionValid = false;
+    double m_lastPlaybackFraction = 0.0;
+
+    // Visual-only native pause latch. Never seeks or changes playback state.
+    bool m_visualPauseFreeze = false;
+    bool m_visualPauseReleasePending = false;
+    bool m_keyboardNudgeSeekPending = false;
+    double m_visualPauseFraction = 0.0;
+
+    // External Play after Stop reopens the track at 0:00; seek back to the stored
+    // stopped position as soon as the playback instance is seekable.
+    bool m_pendingRestartSeek = false;
+    double m_pendingRestartFraction = 0.0;
+    std::string m_pendingRestartTrackPath;
+    t_uint32 m_pendingRestartTrackSubsong = 0;
+
+    // Same-track Stop -> Play keeps the cursor at its existing visual X rather
+    // than forcing centered follow to jump it to 50% of the waveform window.
+    bool m_resumeVisualAnchorActive = false;
+    double m_resumeVisualAnchor = 0.5;
+
     std::thread m_worker;
     std::shared_ptr<abort_callback_impl> m_abort;
     std::atomic_bool m_analyzing{false};
