@@ -364,7 +364,7 @@ private:
             case VK_LEFT:
             case VK_RIGHT: {
                 auto pc = playback_control::get();
-                if (!pc->is_playing()) {
+                if (!pc->is_playing() || pc->is_paused()) {
                     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
                     nudge_stopped_playhead(
                         wp == VK_LEFT ? -1 : 1, ctrl);
@@ -2273,24 +2273,51 @@ private:
         if (direction == 0) return;
 
         auto pc = playback_control::get();
-        if (pc->is_playing()) return;
+        const bool paused = pc->is_playing() && pc->is_paused();
+        if (pc->is_playing() && !paused) return;
 
         // Cursor travel is defined by the current visible window, not a fixed
-        // number of seconds. Regular arrows use the previous fine resolution;
-        // Ctrl+Arrow is four times finer for precise cue/loop positioning.
+        // number of seconds. Regular arrows are zoom-scaled; Ctrl+Arrow is four
+        // times finer/slower for precise cue and future loop positioning.
         const double visibleStep = m_viewSpan * (fine ? 0.00025 : 0.001);
 
-        double position = m_stoppedPositionValid
-            ? m_stoppedPositionFraction
-            : (m_lastPlaybackFractionValid ? m_lastPlaybackFraction : 0.0);
+        double position = 0.0;
+        if (paused) {
+            if (m_visualPauseFreeze) {
+                position = m_visualPauseFraction;
+            } else if (!playback_fraction(position)) {
+                position = m_lastPlaybackFractionValid
+                    ? m_lastPlaybackFraction : 0.0;
+            }
+        } else {
+            position = m_stoppedPositionValid
+                ? m_stoppedPositionFraction
+                : (m_lastPlaybackFractionValid ? m_lastPlaybackFraction : 0.0);
+        }
+
         position = std::clamp(
             position + static_cast<double>(direction) * visibleStep,
             0.0, 1.0);
 
-        m_stoppedPositionFraction = position;
-        m_stoppedPositionValid = true;
-        m_lastPlaybackFraction = position;
-        m_lastPlaybackFractionValid = true;
+        if (paused) {
+            // Move foobar's paused transport position too, but keep playback
+            // paused. Hold the requested visual cursor exactly through the seek.
+            const double length = pc->playback_get_length_ex();
+            if (length <= 0.0 || !pc->playback_can_seek()) return;
+
+            m_visualPauseFraction = position;
+            m_visualPauseFreeze = true;
+            m_visualPauseReleasePending = false;
+            m_keyboardNudgeSeekPending = true;
+            m_lastPlaybackFraction = position;
+            m_lastPlaybackFractionValid = true;
+            pc->playback_seek(position * length);
+        } else {
+            m_stoppedPositionFraction = position;
+            m_stoppedPositionValid = true;
+            m_lastPlaybackFraction = position;
+            m_lastPlaybackFractionValid = true;
+        }
 
         // Keep keyboard positioning visible without needlessly recentering.
         if (m_viewSpan < 0.9995 &&
@@ -2453,6 +2480,7 @@ private:
         m_releasePauseOwned = false;
         m_visualPauseFreeze = false;
         m_visualPauseReleasePending = false;
+        m_keyboardNudgeSeekPending = false;
 
         // Test16: the live on-screen view is authoritative. If the same track is
         // restarted after Stop, preserve whatever zoom/pan/follow state exists
@@ -2541,22 +2569,34 @@ private:
         m_releasePauseOwned = false;
         m_visualPauseFreeze = false;
         m_visualPauseReleasePending = false;
+        m_keyboardNudgeSeekPending = false;
         stop_analysis();
         invalidate_all(false);
     }
     void on_playback_seek(double) override {
         auto pc = playback_control::get();
         if (pc->is_playing() && pc->is_paused()) {
-            double positionFrac = 0.0;
-            if (playback_fraction(positionFrac)) {
-                m_visualPauseFraction =
-                    std::clamp(positionFrac, 0.0, 1.0);
+            if (m_keyboardNudgeSeekPending) {
+                // nudge_stopped_playhead() already chose the exact cursor
+                // location. Do not replace it with a decoder-rounded position.
+                m_keyboardNudgeSeekPending = false;
                 m_visualPauseFreeze = true;
                 m_visualPauseReleasePending = false;
                 m_lastPlaybackFraction = m_visualPauseFraction;
                 m_lastPlaybackFractionValid = true;
+            } else {
+                double positionFrac = 0.0;
+                if (playback_fraction(positionFrac)) {
+                    m_visualPauseFraction =
+                        std::clamp(positionFrac, 0.0, 1.0);
+                    m_visualPauseFreeze = true;
+                    m_visualPauseReleasePending = false;
+                    m_lastPlaybackFraction = m_visualPauseFraction;
+                    m_lastPlaybackFractionValid = true;
+                }
             }
         } else {
+            m_keyboardNudgeSeekPending = false;
             remember_live_playback_position();
         }
 
@@ -2697,6 +2737,7 @@ private:
     // Visual-only native pause latch. Never seeks or changes playback state.
     bool m_visualPauseFreeze = false;
     bool m_visualPauseReleasePending = false;
+    bool m_keyboardNudgeSeekPending = false;
     double m_visualPauseFraction = 0.0;
 
     // External Play after Stop reopens the track at 0:00; seek back to the stored
