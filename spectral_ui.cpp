@@ -359,6 +359,7 @@ private:
             m_dragging = false;
             m_dragMoved = false;
             m_centerScrubbing = false;
+            m_dragCanCenterScrub = false;
             m_scrubAudibleActive = false;
             // If capture is lost unexpectedly (Alt-Tab, another popup, etc.),
             // commit the virtual platter position exactly once.
@@ -1491,33 +1492,18 @@ private:
         m_dragStartX = x;
         m_dragStartView = m_viewStart;
         m_dragStartTick = GetTickCount64();
-        // Do not seek immediately on the first few pixels of a grab. If the
-        // gesture is short, release performs the only seek and feels much cleaner.
         m_scrubLastSeekTick = m_dragStartTick;
         m_scrubLastMotionTick = m_dragStartTick;
         m_scrubLastMotionX = x;
         m_scrubAudibleActive = false;
         m_centerScrubbing = false;
 
-        double positionFrac = 0.0;
+        // A simple click must remain a plain foobar seek. Only arm the special
+        // centered scrub/hold transport after the pointer actually moves far
+        // enough to become a drag.
         auto pc = playback_control::get();
-        if (pc->is_playing() &&
-            !pc->is_paused() &&
-            pc->playback_can_seek() &&
-            playback_fraction(positionFrac)) {
-
-            m_centerScrubbing = true;
-            m_scrubStartPosition = positionFrac;
-            m_scrubTargetPosition = positionFrac;
-            m_scrubAnchorX = std::clamp(
-                (positionFrac - m_viewStart) / m_viewSpan, 0.0, 1.0);
-            m_touchHoldPosition = positionFrac;
-            m_touchHoldAnchorX = m_scrubAnchorX;
-
-            // Keep foobar's audio clock alive; Stem Separator replaces its output
-            // with silence so the platter is audibly stationary and can still jog.
-            if (!set_transport_hold(positionFrac)) pause_for_touch_fallback();
-        }
+        m_dragCanCenterScrub =
+            pc->is_playing() && !pc->is_paused() && pc->playback_can_seek();
 
         SetCapture(m_wnd);
     }
@@ -1538,9 +1524,28 @@ private:
         const int dx = x - m_dragStartX;
         if (std::abs(dx) >= 3) {
             m_dragMoved = true;
-            if (!m_centerScrubbing) m_followPlayhead = false;
         }
         if (!m_dragMoved) return;
+
+        if (!m_centerScrubbing && m_dragCanCenterScrub) {
+            double positionFrac = 0.0;
+            auto pc = playback_control::get();
+            if (pc->is_playing() && !pc->is_paused() &&
+                pc->playback_can_seek() && playback_fraction(positionFrac)) {
+                m_centerScrubbing = true;
+                m_scrubStartPosition = positionFrac;
+                m_scrubTargetPosition = positionFrac;
+                m_scrubAnchorX = std::clamp(
+                    (positionFrac - m_viewStart) / m_viewSpan, 0.0, 1.0);
+                m_touchHoldPosition = positionFrac;
+                m_touchHoldAnchorX = m_scrubAnchorX;
+
+                // Only a real drag enters the special platter hold path.
+                if (!set_transport_hold(positionFrac)) pause_for_touch_fallback();
+            }
+        }
+
+        if (!m_centerScrubbing) m_followPlayhead = false;
         if (m_viewSpan >= 0.9995 && !m_centerScrubbing) return;
 
         if (m_centerScrubbing) {
@@ -1589,6 +1594,7 @@ private:
         m_dragging = false;
         m_dragMoved = false;
         m_centerScrubbing = false;
+        m_dragCanCenterScrub = false;
         m_scrubAudibleActive = false;
         if (GetCapture() == m_wnd) ReleaseCapture();
 
@@ -2527,6 +2533,7 @@ private:
     bool m_dragging = false;
     bool m_dragMoved = false;
     bool m_centerScrubbing = false;
+    bool m_dragCanCenterScrub = false;
     int m_dragStartX = 0;
     double m_dragStartView = 0.0;
     ULONGLONG m_dragStartTick = 0;
