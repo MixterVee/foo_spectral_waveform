@@ -325,11 +325,10 @@ private:
             show_context_menu(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_GETDLGCODE:
-            if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_UP || wp == VK_DOWN)
-                return DLGC_WANTARROWS;
-            if (wp == VK_SPACE || wp == 'H' || wp == 'R')
-                return DLGC_WANTCHARS;
-            return 0;
+            // Claim the waveform's keyboard input consistently. Enter is still
+            // intercepted earlier by the global message filter and routed to
+            // foobar's native Play or pause command.
+            return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_KEYDOWN:
             switch (wp) {
             case VK_SPACE: {
